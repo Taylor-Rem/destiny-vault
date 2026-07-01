@@ -1,0 +1,24 @@
+# ==== Secrets — per-user Bungie API credentials & OAuth token (NEVER COMMIT) ====
+.destiny_config.json
+.destiny_token.json
+
+# ==== Personal — your account info & builds. Copy from preferences.example.yaml ====
+preferences.yaml
+
+# ==== Personal output — reveals your inventory (item instance IDs) ====
+vault_report.json
+
+# ==== Generated / cached ====
+# .manifest_cache.json is rebuilt on demand from the Bungie manifest
+.manifest_cache.json
+__pycache__/
+*.py[cod]
+
+# ==== Virtual environments ====
+venv/
+.venv/
+env/
+
+# ==== OS cruft ====
+.DS_Store
+Thumbs.db

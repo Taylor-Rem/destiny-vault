@@ -1,0 +1,40 @@
+# =============================================================================
+# preferences.example.yaml - TEMPLATE for your personal preferences
+# =============================================================================
+# Copy this file to `preferences.yaml` (which is gitignored) and fill it in.
+# Nothing here is required by the tool to run; it's context that helps tailor
+# keep/dismantle decisions to how YOU play (and helps an AI assistant help you).
+#
+#     cp preferences.example.yaml preferences.yaml
+#
+# -----------------------------------------------------------------------------
+
+account:
+  bungie_name: YourNameHere      # your Bungie display name
+  main_class: Warlock            # Titan | Hunter | Warlock
+
+# Which characters actually matter for keep/dismantle. List only the ones you
+# play; class-specific gear for the others can be treated as low priority.
+focus:
+  characters: [Warlock]
+  deprioritize_classes: [Titan, Hunter]
+
+# Weight keep-rules toward the content you run. PvE endgame wants perks like
+# Bait and Switch / Incandescent / Reconstruction; PvP wants Opening Shot / Snapshot.
+activities:
+  primary: ""                    # e.g. "PvE endgame — raids, GMs, dungeons" or "PvP"
+  playstyle: ""                  # e.g. "ability spam", "weapon DPS", "support"
+  notes: ""
+
+# Weapons / archetypes you consider keepers by default.
+favorites:
+  weapons: []
+  exotic_armor_in_use: []        # exotic armor your builds depend on
+
+# Things you never want dismantled.
+never_dismantle:
+  loadout_items: true            # keep anything equipped in an in-game loadout
+  all_exotics: true              # exotics are cheap to keep + re-pullable
+  notes: ""
+
+# See DESTINY_REFERENCE.md for the current-sandbox rules these decisions assume.

@@ -1,0 +1,33 @@
+# =============================================================================
+# rules.yaml - your god-roll keep/dismantle rules
+# =============================================================================
+# Each top-level key is a weapon/armor NAME exactly as it appears in-game.
+# Under it, "require" is a list of perk GROUPS. An item is a KEEP only if it
+# has at least one perk from EVERY group. Otherwise it's marked DISMANTLE.
+#
+# Think of each group as one "column" of the roll. List all the perks you'd
+# accept in that column as alternatives.
+#
+# Any weapon NOT listed here is left alone (shown under "NOT IN RULES").
+#
+# Perk names must match in-game text exactly (case-sensitive).
+# -----------------------------------------------------------------------------
+
+# ---- EXAMPLE (delete or edit) ----------------------------------------------
+# Keep a Fatebringer only if it has (Explosive Payload OR Firefly) in one
+# column AND (Frenzy OR Rampage) in the other:
+Fatebringer:
+  require:
+    - [Explosive Payload, Firefly]
+    - [Frenzy, Rampage]
+
+# Keep any The Messenger with Rapid Hit + Kill Clip:
+The Messenger:
+  require:
+    - [Rapid Hit]
+    - [Kill Clip]
+
+# A weapon where you only care about ONE trait (single group):
+# Round Robin:
+#   require:
+#     - [Precision Instrument, Kinetic Tremors]
