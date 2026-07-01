@@ -5,12 +5,14 @@
 # ==== Personal — your account info & builds. Copy from preferences.example.yaml ====
 preferences.yaml
 
-# ==== Personal output — reveals your inventory (item instance IDs) ====
+# ==== Personal output — reveals your inventory ====
 vault_report.json
+VAULT_REPORT.md
 
 # ==== Generated / cached ====
-# .manifest_cache.json is rebuilt on demand from the Bungie manifest
+# .manifest_cache.json / .weapon_defs_cache.json are rebuilt on demand from the Bungie manifest
 .manifest_cache.json
+.weapon_defs_cache.json
 __pycache__/
 *.py[cod]
 
@@ -22,3 +24,6 @@ env/
 # ==== OS cruft ====
 .DS_Store
 Thumbs.db
+
+# ==== Personal god-roll rules (copy from rules.example.yaml) ====
+rules.yaml

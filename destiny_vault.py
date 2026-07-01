@@ -95,6 +95,8 @@ def api_post(path, body, token):
 
 def cmd_setup():
     print("Enter the values from your Bungie app at https://www.bungie.net/en/Application")
+    print("TIP: choose OAuth Client Type = 'Confidential' to get a client_secret — that enables")
+    print("     silent auto-refresh (~90 days between logins). 'Public' apps have no refresh token.")
     api_key = input("  API Key: ").strip()
     client_id = input("  OAuth client_id: ").strip()
     client_secret = input("  OAuth client_secret (blank if Public client): ").strip()
@@ -106,13 +108,11 @@ def cmd_setup():
     print("Saved to %s" % CONFIG_PATH)
     print("Redirect URL registered on your app MUST be exactly: %s" % REDIRECT_URI)
 
-def _exchange_code(code):
+def _token_request(body):
+    """POST to the OAuth token endpoint (authorization_code or refresh_token grant),
+    stamp + persist the resulting token, and return it. Shared by login and refresh."""
     cfg = load_json(CONFIG_PATH)
-    body = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "client_id": cfg["client_id"],
-    }
+    body = dict(body, client_id=cfg["client_id"])
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     if cfg.get("client_secret"):
         basic = base64.b64encode(
@@ -128,6 +128,17 @@ def _exchange_code(code):
     tok["obtained_at"] = int(time.time())
     save_json(TOKEN_PATH, tok)
     return tok
+
+def _exchange_code(code):
+    return _token_request({"grant_type": "authorization_code", "code": code})
+
+def _refresh_token(tok):
+    """Use the stored refresh_token to get a fresh access token silently.
+    Only works for Confidential OAuth apps (Public apps get no refresh_token)."""
+    return _token_request({
+        "grant_type": "refresh_token",
+        "refresh_token": tok["refresh_token"],
+    })
 
 def cmd_login():
     cfg = load_json(CONFIG_PATH) or die("Run 'setup' first.")
@@ -150,14 +161,35 @@ def cmd_login():
     else:
         code = pasted
     tok = _exchange_code(code)
-    print("Logged in. Access token valid ~%s min." % (tok.get("expires_in", 3600) // 60))
+    if tok.get("refresh_token"):
+        print("Logged in. Access token ~%s min; auto-refresh ENABLED (~%s days before re-login)."
+              % (tok.get("expires_in", 3600) // 60, tok.get("refresh_expires_in", 7776000) // 86400))
+    else:
+        print("Logged in. Access token valid ~%s min. (Public app: NO auto-refresh — you'll re-run "
+              "'login' each time it expires. Switch to a Confidential app to enable auto-refresh.)"
+              % (tok.get("expires_in", 3600) // 60))
 
 def get_token():
     tok = load_json(TOKEN_PATH) or die("Run 'login' first.")
     age = int(time.time()) - tok.get("obtained_at", 0)
-    if age > tok.get("expires_in", 3600) - 120:
-        print("(access token expired - run 'login' again)")
-    return tok["access_token"], tok
+    if age <= tok.get("expires_in", 3600) - 120:
+        return tok["access_token"], tok
+    # Access token expired. If we have a refresh token (Confidential apps only),
+    # renew silently; refresh tokens themselves last ~90 days.
+    if tok.get("refresh_token"):
+        if age > tok.get("refresh_expires_in", 7776000) - 120:
+            die("Session fully expired (>90 days). Re-run: python3 destiny_vault.py login")
+        try:
+            tok = _refresh_token(tok)
+            print("(access token auto-refreshed)")
+            return tok["access_token"], tok
+        except Exception as e:
+            die("Auto-refresh failed (%s). Re-run: python3 destiny_vault.py login" % e)
+    # Public OAuth client: no refresh token exists, so we can't renew silently.
+    die("Access token expired (~1h) and this is a Public app with no refresh token.\n"
+        "  Re-run: python3 destiny_vault.py login\n"
+        "  To enable auto-refresh, switch your Bungie app to a Confidential client "
+        "(gives a client_secret), then re-run 'setup' and 'login'.")
 
 # ---------------------------------------------------------------------------
 # account / membership
@@ -262,11 +294,69 @@ def def_name(entity_type, hash_):
     except SystemExit:
         name = str(hash_)
     cache[key] = name
-    save_json(MANIFEST_CACHE, cache)
+    _mark_dirty(MANIFEST_CACHE, cache)
     return name
 
+# Periodic cache flush: heavy scans do thousands of lookups, so we avoid
+# rewriting the whole cache file on every single one (that made scans crawl).
+_dirty = {}
+def _mark_dirty(path, cache):
+    _dirty[path] = cache
+    if len(cache) % 200 == 0:
+        save_json(path, cache)
+def _flush_caches():
+    for path, cache in _dirty.items():
+        save_json(path, cache)
+    _dirty.clear()
+
+# richer per-item metadata (name / itemType / tier / weapon type), cached on disk
+WDEF_CACHE = os.path.join(HERE, ".weapon_defs_cache.json")
+_wdefs = None
+def item_meta(hash_):
+    """Cached {name, itemType, tier, type}. itemType 3 == Weapon; tier 6 == Exotic."""
+    global _wdefs
+    if _wdefs is None:
+        _wdefs = load_json(WDEF_CACHE, {})
+    k = str(hash_)
+    if k in _wdefs:
+        return _wdefs[k]
+    try:
+        d = api_get("/Destiny2/Manifest/DestinyInventoryItemDefinition/%s/" % hash_)
+    except SystemExit:
+        d = {}
+    _wdefs[k] = {
+        "name": d.get("displayProperties", {}).get("name", str(hash_)),
+        "itemType": d.get("itemType"),
+        "tier": d.get("inventory", {}).get("tierType"),
+        "type": d.get("itemTypeDisplayName", ""),
+    }
+    _mark_dirty(WDEF_CACHE, _wdefs)
+    return _wdefs[k]
+
+# Curated behavioural weapon perks. Used for (a) sole-source coverage and (b) as
+# a signal set — NOT for duplicate detection (that uses the full plug set). Keep
+# in sync with research/weapons-pve-perks.md.
+TRAIT_PERKS = {
+    # boss / DPS
+    "Bait and Switch", "Envious Arsenal", "Envious Assassin", "Reconstruction",
+    "Triple Tap", "Focused Fury", "Vorpal Weapon", "Firing Line", "Cascade Point",
+    "Fourth Time's the Charm", "Bipod", "Killing Tally", "High-Impact Reserves",
+    "Explosive Light", "Recombination", "Target Lock", "Frenzy", "Successful Warm-Up",
+    "Rewind Rounds", "Precision Instrument",
+    # ad-clear / verbs
+    "Incandescent", "Voltshot", "Chain Reaction", "Destabilizing Rounds",
+    "Jolting Feedback", "Dragonfly", "Firefly", "Hatchling", "Chill Clip",
+    "Golden Tricorn", "Adagio", "Onslaught", "Kinetic Tremors", "Headstone",
+    "Sword Logic", "One for All", "Collective Action", "Repulsor Brace",
+    # ability / economy
+    "Demolitionist", "Wellspring", "Pugilist", "Grave Robber", "Osmosis",
+    "Attrition Orbs", "Classy Contender", "Subsistence", "Feeding Frenzy",
+    "Overflow", "Clown Cartridge", "Ambitious Assassin", "Rapid Hit", "Outlaw",
+    "Perpetual Motion", "Discord", "Lead from Gold", "Shoot to Loot",
+}
+
 # ---------------------------------------------------------------------------
-# scan
+# scan / classify
 # ---------------------------------------------------------------------------
 
 def load_rules():
@@ -281,8 +371,8 @@ def load_rules():
 
 def fetch_profile(token):
     mtype, mid, name = get_membership(token)
-    # 102 vault, 201 char inv, 205 equipped, 300 instances, 305 sockets
-    comps = "102,201,205,300,305"
+    # 102 vault, 201 char inv, 205 equipped, 206 loadouts, 300 instances, 305 sockets
+    comps = "102,201,205,206,300,305"
     prof = api_get("/Destiny2/%s/Profile/%s/?components=%s" % (mtype, mid, comps), token)
     return mtype, mid, prof
 
@@ -316,75 +406,142 @@ def classify(item_name, perk_names, rule):
         return False, "missing: " + "; ".join(missing)
     return True, "matches god roll"
 
+def _collect_weapons(prof, sockets_data, protected):
+    """Return a list of weapon dicts (weapons only) with metadata + perks."""
+    raw = []
+    for it in prof.get("profileInventory", {}).get("data", {}).get("items", []):
+        it["_loc"] = "Vault"; raw.append(it)
+    for cid, inv in prof.get("characterInventories", {}).get("data", {}).items():
+        for it in inv.get("items", []):
+            it["_loc"] = "Char " + cid[-4:]; raw.append(it)
+    for cid, inv in prof.get("characterEquipment", {}).get("data", {}).items():
+        for it in inv.get("items", []):
+            it["_loc"] = "Equip " + cid[-4:]; raw.append(it)
+
+    weapons = []
+    for it in raw:
+        iid = it.get("itemInstanceId")
+        if not iid:
+            continue
+        meta = item_meta(it["itemHash"])
+        if meta.get("itemType") != 3:
+            continue  # weapons only; armor keep-value needs different logic
+        perks = [def_name("DestinyInventoryItemDefinition", h)
+                 for h in item_active_perks(iid, sockets_data)]
+        weapons.append({
+            "name": meta["name"], "loc": it["_loc"], "iid": iid,
+            "tier": meta.get("tier"), "type": meta.get("type", ""),
+            "perks": perks, "sig": frozenset(perks),
+            "traits": set(perks) & TRAIT_PERKS, "prot": iid in protected,
+            "reason": None,
+        })
+    return weapons
+
 def cmd_scan(do_lock=False):
+    from collections import defaultdict
     token, _ = get_token()
     rules = load_rules()
     mtype, mid, prof = fetch_profile(token)
-
     sockets_data = prof.get("itemComponents", {}).get("sockets", {}).get("data", {})
 
-    # collect items from vault + all character inventories
-    items = []
-    vault = prof.get("profileInventory", {}).get("data", {}).get("items", [])
-    for it in vault:
-        it["_loc"] = "Vault"
-        items.append(it)
-    for cid, inv in prof.get("characterInventories", {}).get("data", {}).items():
-        for it in inv.get("items", []):
-            it["_loc"] = "Char " + cid[-4:]
-            items.append(it)
+    # Pass 0 inputs: instances that are equipped or sit in an in-game loadout
+    protected = set()
+    for _cid, invd in prof.get("characterEquipment", {}).get("data", {}).items():
+        for it in invd.get("items", []):
+            if it.get("itemInstanceId"):
+                protected.add(it["itemInstanceId"])
+    for _cid, cl in prof.get("characterLoadouts", {}).get("data", {}).items():
+        for lo in cl.get("loadouts", []):
+            for it in lo.get("items", []):
+                iid = it.get("itemInstanceId", "0")
+                if iid != "0":
+                    protected.add(iid)
 
-    keepers, junk, unranked = [], [], []
-    for it in items:
-        iid = it.get("itemInstanceId")
-        if not iid:
-            continue  # not an instanced item (materials, etc.)
-        name = def_name("DestinyInventoryItemDefinition", it["itemHash"])
-        if name not in rules:
-            unranked.append((name, it["_loc"], iid))
-            continue
-        perk_hashes = item_active_perks(iid, sockets_data)
-        perk_names = [def_name("DestinyInventoryItemDefinition", h) for h in perk_hashes]
-        keep, reason = classify(name, perk_names, rules[name])
-        row = (name, it["_loc"], iid, reason, perk_names)
-        (keepers if keep else junk).append(row)
+    weapons = _collect_weapons(prof, sockets_data, protected)
+    _flush_caches()
 
-    print("\n===== KEEP (%d) =====" % len(keepers))
-    for name, loc, iid, reason, perks in keepers:
-        print("  [KEEP] %-28s %-10s | %s" % (name[:28], loc, reason))
-    print("\n===== DISMANTLE (%d) =====" % len(junk))
-    for name, loc, iid, reason, perks in junk:
-        print("  [JUNK] %-28s %-10s | %s" % (name[:28], loc, reason))
-        print("         has: %s" % ", ".join(perks))
-    print("\n===== NOT IN RULES (%d) - skipped =====" % len(unranked))
-    for name, loc, iid in unranked[:40]:
-        print("  [ -- ] %-28s %-10s" % (name[:28], loc))
-    if len(unranked) > 40:
-        print("  ...and %d more" % (len(unranked) - 40))
+    # Pass 2 input: which trait perks are on exactly ONE weapon (vault-relative)
+    sources = defaultdict(set)
+    for w in weapons:
+        for p in w["traits"]:
+            sources[p].add(w["iid"])
 
-    # write a report file too
+    # base KEEP reasons: Pass 0 (protect) > Pass 1 (god roll) > Pass 2 (sole source)
+    for w in weapons:
+        if w["prot"]:
+            w["reason"] = "in loadout / equipped"
+        elif w["name"] in rules and classify(w["name"], w["perks"], rules[w["name"]])[0]:
+            w["reason"] = "god roll"
+        else:
+            sole = sorted(p for p in w["traits"] if len(sources[p]) == 1)
+            if sole:
+                w["reason"] = "only source of " + ", ".join(sole)
+
+    # Passes 3-5: group by (name + identical full roll); collapse exact duplicates.
+    keep, dismantle, review = [], [], []
+    groups = defaultdict(list)
+    for w in weapons:
+        groups[(w["name"], w["sig"])].append(w)
+    for (nm, sig), grp in groups.items():
+        # representative = protected first, then has-a-reason, then highest tier
+        grp.sort(key=lambda w: (not w["prot"], w["reason"] is None, -(w["tier"] or 0)))
+        rep, extras = grp[0], grp[1:]
+        if extras:  # >1 identical copy: keep one, the rest are exact-dup candidates
+            rep["reason"] = rep["reason"] or ("kept 1 of %d identical" % len(grp))
+            keep.append(rep)
+            for w in extras:
+                if w["prot"] or (w["reason"] and w["reason"].startswith("only source")):
+                    keep.append(w)                       # never dismantle a protected/sole copy
+                elif rep["tier"] == 6:
+                    w["reason"] = "duplicate exotic (keep 1)"
+                    review.append(w)                     # exotics -> review (Ergo Sum etc.)
+                else:
+                    w["reason"] = "exact duplicate roll"
+                    dismantle.append(w)                  # only truly identical legendaries
+        else:  # single copy
+            if rep["reason"]:
+                keep.append(rep)
+            else:
+                rep["reason"] = "no god-roll / coverage match"
+                review.append(rep)                       # conservative: your call, not auto-dismantle
+
+    print("\n===== VAULT CLEANUP (%d weapons) =====" % len(weapons))
+    print("  KEEP:      %d" % len(keep))
+    print("  DISMANTLE: %d   (exact-duplicate rolls only)" % len(dismantle))
+    print("  REVIEW:    %d   (your call — nothing auto-dismantled here)" % len(review))
+
+    print("\n----- DISMANTLE (safe: identical duplicates) -----")
+    for w in sorted(dismantle, key=lambda w: w["name"])[:60]:
+        print("  [DISMANTLE] %-26s %-9s | %s" % (w["name"][:26], w["loc"], w["reason"]))
+    if len(dismantle) > 60:
+        print("  ...and %d more (see vault_report.json)" % (len(dismantle) - 60))
+
+    print("\n----- REVIEW (sample) -----")
+    for w in review[:25]:
+        print("  [REVIEW] %-26s %-9s | %s" % (w["name"][:26], w["loc"], w["reason"]))
+    if len(review) > 25:
+        print("  ...and %d more (see vault_report.json)" % (len(review) - 25))
+
+    def row(w):
+        return {"name": w["name"], "loc": w["loc"], "id": w["iid"],
+                "reason": w["reason"], "perks": sorted(w["traits"])}
     report = {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "keep": [{"name": r[0], "loc": r[1], "id": r[2], "reason": r[3]} for r in keepers],
-        "dismantle": [{"name": r[0], "loc": r[1], "id": r[2], "reason": r[3],
-                        "perks": r[4]} for r in junk],
+        "summary": {"weapons": len(weapons), "keep": len(keep),
+                    "dismantle": len(dismantle), "review": len(review)},
+        "keep": [row(w) for w in keep],
+        "dismantle": [row(w) for w in dismantle],
+        "review": [row(w) for w in review],
     }
     save_json(os.path.join(HERE, "vault_report.json"), report)
     print("\nFull report saved to vault_report.json")
 
     if do_lock:
-        _lock_keepers(token, mtype, keepers, prof)
-
-def _char_for_item(iid, prof):
-    """Find which character a vault item can be locked from (any works)."""
-    chars = list(prof.get("characters", {}).get("data", {}).keys())
-    return chars[0] if chars else None
+        _lock_keepers(token, mtype, keep, prof)
 
 def _lock_keepers(token, mtype, keepers, prof):
-    char_id = None
     chars = list(prof.get("characters", {}).get("data", {}).keys())
-    if chars:
-        char_id = chars[0]
+    char_id = chars[0] if chars else None
     if not char_id:
         die("No character found to issue lock command.")
     print("\nAbout to LOCK %d keeper items via the API." % len(keepers))
@@ -392,19 +549,14 @@ def _lock_keepers(token, mtype, keepers, prof):
         print("Aborted. Nothing locked.")
         return
     ok = 0
-    for name, loc, iid, reason, perks in keepers:
-        body = {
-            "state": True,
-            "itemId": iid,
-            "characterId": char_id,
-            "membershipType": mtype,
-        }
+    for w in keepers:
+        body = {"state": True, "itemId": w["iid"],
+                "characterId": char_id, "membershipType": mtype}
         try:
             api_post("/Destiny2/Actions/Items/SetLockState/", body, token)
             ok += 1
-            print("  locked: %s" % name)
         except SystemExit:
-            print("  FAILED to lock: %s" % name)
+            print("  FAILED to lock: %s" % w["name"])
     print("Locked %d/%d keepers." % (ok, len(keepers)))
 
 # ---------------------------------------------------------------------------

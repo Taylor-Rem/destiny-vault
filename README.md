@@ -26,11 +26,16 @@ pip install pyyaml
 
 ### 2. Register a Bungie application
 1. Go to <https://www.bungie.net/en/Application> and create an app.
-2. Set the **OAuth Client Type** and, importantly, set the **Redirect URL** to exactly:
+2. Set the **Redirect URL** to exactly:
    ```
    https://localhost:7777/callback
    ```
-3. Note your **API Key**, **OAuth client_id**, and (if a Confidential client) **client_secret**.
+3. Choose an **OAuth Client Type**:
+   - **Confidential** (recommended) → you get a **client_secret**, which enables **silent
+     auto-refresh**: access tokens renew themselves for ~90 days before you must log in again.
+   - **Public** → no client_secret and **no refresh token**, so you must re-run `login` every
+     ~1 hour when the access token expires.
+4. Note your **API Key**, **OAuth client_id**, and (Confidential only) **client_secret**.
 
 ### 3. Configure & log in
 ```bash
