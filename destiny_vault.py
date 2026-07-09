@@ -19,6 +19,16 @@ USAGE
     python3 destiny_vault.py loadouts     # list your in-game loadouts per character
     python3 destiny_vault.py scan         # read vault, apply rules.yaml, report
     python3 destiny_vault.py lock-keepers # lock everything marked KEEP (asks first)
+    python3 destiny_vault.py unlock-all   # unlock all locked weapons (clean slate)
+    python3 destiny_vault.py armor-scan [build]        # rank armor for Super builds
+    python3 destiny_vault.py armor-cleanup [--lock]    # Warlock keep/dismantle armor
+                                                       #   report; --lock re-syncs locks
+    python3 destiny_vault.py equip-armor <build> [--loadout N] [--dry-run]
+    python3 destiny_vault.py apply-loadout <build> <slot 1-10> [--dry-run]
+
+    builds: super-class | super-grenade | super-melee   ("Intellect" is now Super)
+    equip-armor / apply-loadout write to your LIVE character (be in orbit). Add
+    --dry-run to preview the transfer/equip plan without changing anything.
 
 Requires: Python 3.8+, and PyYAML  (pip3 install pyyaml)
 """
@@ -29,6 +39,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -88,6 +99,26 @@ def api_post(path, body, token):
     if data.get("ErrorCode", 1) != 1:
         die("Bungie API error %s: %s" % (data.get("ErrorStatus"), data.get("Message")))
     return data["Response"]
+
+def api_action(path, body, token):
+    """POST like api_post but NON-fatal: returns the full response dict (incl.
+    ErrorCode/ErrorStatus/Message) instead of dying, so callers can handle
+    per-item failures (in-activity, wrong location, etc.) themselves."""
+    cfg = load_json(CONFIG_PATH) or {}
+    raw = json.dumps(body).encode()
+    req = urllib.request.Request(API_ROOT + path, data=raw, method="POST")
+    req.add_header("X-API-Key", cfg["api_key"])
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            return json.load(e)
+        except Exception:
+            return {"ErrorCode": -1, "ErrorStatus": "HTTPError", "Message": str(e)}
 
 # ---------------------------------------------------------------------------
 # setup + oauth
@@ -333,10 +364,14 @@ def item_meta(hash_):
     _mark_dirty(WDEF_CACHE, _wdefs)
     return _wdefs[k]
 
-# Curated behavioural weapon perks. Used for (a) sole-source coverage and (b) as
-# a signal set — NOT for duplicate detection (that uses the full plug set). Keep
-# in sync with research/weapons-pve-perks.md.
-TRAIT_PERKS = {
+# Curated behavioural weapon perks, split into VALUE TIERS per the owner's policy
+# (boss DPS / ad-clear > ability regen > handling). VALUED_PERKS (DPS/ad-clear +
+# ability) are worth keeping a *distinct* duplicate for; FILLER_PERKS
+# (reload/handling/ammo economy) are not — a copy whose only edge over a kept
+# copy is a filler perk is treated as covered and dismantled. TRAIT_PERKS (the
+# union) drives sole-source coverage, so it must stay comprehensive. Keep in
+# sync with research/weapons-pve-perks.md.
+DPS_ADCLEAR_PERKS = {
     # boss / DPS
     "Bait and Switch", "Envious Arsenal", "Envious Assassin", "Reconstruction",
     "Triple Tap", "Focused Fury", "Vorpal Weapon", "Firing Line", "Cascade Point",
@@ -348,12 +383,18 @@ TRAIT_PERKS = {
     "Jolting Feedback", "Dragonfly", "Firefly", "Hatchling", "Chill Clip",
     "Golden Tricorn", "Adagio", "Onslaught", "Kinetic Tremors", "Headstone",
     "Sword Logic", "One for All", "Collective Action", "Repulsor Brace",
-    # ability / economy
-    "Demolitionist", "Wellspring", "Pugilist", "Grave Robber", "Osmosis",
-    "Attrition Orbs", "Classy Contender", "Subsistence", "Feeding Frenzy",
-    "Overflow", "Clown Cartridge", "Ambitious Assassin", "Rapid Hit", "Outlaw",
-    "Perpetual Motion", "Discord", "Lead from Gold", "Shoot to Loot",
 }
+ABILITY_PERKS = {  # ability / build economy — this owner (Warlock ability spam) values these
+    "Demolitionist", "Wellspring", "Pugilist", "Grave Robber", "Osmosis",
+    "Attrition Orbs", "Classy Contender", "Discord",
+}
+FILLER_PERKS = {   # reload / handling / ammo economy — not worth keeping a dupe for
+    "Subsistence", "Feeding Frenzy", "Overflow", "Clown Cartridge",
+    "Ambitious Assassin", "Rapid Hit", "Outlaw", "Perpetual Motion",
+    "Lead from Gold", "Shoot to Loot",
+}
+VALUED_PERKS = DPS_ADCLEAR_PERKS | ABILITY_PERKS
+TRAIT_PERKS = VALUED_PERKS | FILLER_PERKS
 
 # ---------------------------------------------------------------------------
 # scan / classify
@@ -371,8 +412,11 @@ def load_rules():
 
 def fetch_profile(token):
     mtype, mid, name = get_membership(token)
-    # 102 vault, 201 char inv, 205 equipped, 206 loadouts, 300 instances, 305 sockets
-    comps = "102,201,205,206,300,305"
+    # 102 vault, 201 char inv, 205 equipped, 206 loadouts, 300 instances,
+    # 305 sockets (active plugs), 310 reusable plugs (all SELECTABLE perks —
+    # needed so high Gear-Tier weapons that can swap perks are judged on what
+    # they CAN roll, not just what's currently slotted)
+    comps = "102,201,205,206,300,305,310"
     prof = api_get("/Destiny2/%s/Profile/%s/?components=%s" % (mtype, mid, comps), token)
     return mtype, mid, prof
 
@@ -385,6 +429,23 @@ def item_active_perks(instance_id, sockets_data):
     for s in entry.get("sockets", []):
         if s.get("isVisible", True) and "plugHash" in s:
             out.append(s["plugHash"])
+    return out
+
+def item_selectable_perks(instance_id, reuse_data):
+    """Every reusable/selectable plug hash across an item's sockets (component
+    310) — i.e. perks the weapon CAN swap to, not just the one slotted. Essential
+    for high Gear-Tier weapons with multiple perks per trait column; without it a
+    swappable god-roll looks identical to a bare roll. Non-trait plugs (barrels,
+    mags, shaders) are filtered out later by TRAIT_PERKS."""
+    entry = reuse_data.get(instance_id)
+    if not entry:
+        return []
+    out = []
+    for _sidx, plugs in entry.get("plugs", {}).items():
+        for p in plugs:
+            h = p.get("plugItemHash")
+            if h:
+                out.append(h)
     return out
 
 def classify(item_name, perk_names, rule):
@@ -406,7 +467,7 @@ def classify(item_name, perk_names, rule):
         return False, "missing: " + "; ".join(missing)
     return True, "matches god roll"
 
-def _collect_weapons(prof, sockets_data, protected):
+def _collect_weapons(prof, sockets_data, reuse_data, protected):
     """Return a list of weapon dicts (weapons only) with metadata + perks."""
     raw = []
     for it in prof.get("profileInventory", {}).get("data", {}).get("items", []):
@@ -428,11 +489,15 @@ def _collect_weapons(prof, sockets_data, protected):
             continue  # weapons only; armor keep-value needs different logic
         perks = [def_name("DestinyInventoryItemDefinition", h)
                  for h in item_active_perks(iid, sockets_data)]
+        pool = perks + [def_name("DestinyInventoryItemDefinition", h)
+                        for h in item_selectable_perks(iid, reuse_data)]
         weapons.append({
             "name": meta["name"], "loc": it["_loc"], "iid": iid,
             "tier": meta.get("tier"), "type": meta.get("type", ""),
             "perks": perks, "sig": frozenset(perks),
-            "traits": set(perks) & TRAIT_PERKS, "prot": iid in protected,
+            "traits": set(perks) & TRAIT_PERKS,   # currently-slotted behavioural perks
+            "pool": set(pool) & TRAIT_PERKS,       # everything it CAN roll (drives decisions)
+            "prot": iid in protected,
             "reason": None,
         })
     return weapons
@@ -443,6 +508,7 @@ def cmd_scan(do_lock=False):
     rules = load_rules()
     mtype, mid, prof = fetch_profile(token)
     sockets_data = prof.get("itemComponents", {}).get("sockets", {}).get("data", {})
+    reuse_data = prof.get("itemComponents", {}).get("reusablePlugs", {}).get("data", {})
 
     # Pass 0 inputs: instances that are equipped or sit in an in-game loadout
     protected = set()
@@ -457,60 +523,104 @@ def cmd_scan(do_lock=False):
                 if iid != "0":
                     protected.add(iid)
 
-    weapons = _collect_weapons(prof, sockets_data, protected)
+    weapons = _collect_weapons(prof, sockets_data, reuse_data, protected)
     _flush_caches()
 
-    # Pass 2 input: which trait perks are on exactly ONE weapon (vault-relative)
+    # Pass 2 input: which trait perks are on exactly ONE weapon (vault-relative).
+    # Uses the CAN-roll pool, not just slotted perks — a weapon that can swap to a
+    # rare perk still counts as a source of it.
     sources = defaultdict(set)
     for w in weapons:
-        for p in w["traits"]:
+        for p in w["pool"]:
             sources[p].add(w["iid"])
 
-    # base KEEP reasons: Pass 0 (protect) > Pass 1 (god roll) > Pass 2 (sole source)
+    # base KEEP signals: Pass 0 (protect) > Pass 1 (god roll) > Pass 2 (sole source).
+    # God-roll and sole-source both consider the full pool (what the weapon CAN
+    # roll), so a swappable god-roll is recognised even when a filler perk is slotted.
     for w in weapons:
+        w["godroll"] = bool(w["name"] in rules
+                            and classify(w["name"], sorted(w["pool"]), rules[w["name"]])[0])
+        w["sole"] = sorted(p for p in w["pool"] if len(sources[p]) == 1)
         if w["prot"]:
             w["reason"] = "in loadout / equipped"
-        elif w["name"] in rules and classify(w["name"], w["perks"], rules[w["name"]])[0]:
+        elif w["godroll"]:
             w["reason"] = "god roll"
-        else:
-            sole = sorted(p for p in w["traits"] if len(sources[p]) == 1)
-            if sole:
-                w["reason"] = "only source of " + ", ".join(sole)
+        elif w["sole"]:
+            w["reason"] = "only source of " + ", ".join(w["sole"])
+        elif w["tier"] == 6:
+            w["reason"] = "exotic (keep >=1)"      # Pass 3: exotic coverage
 
-    # Passes 3-5: group by (name + identical full roll); collapse exact duplicates.
+    # Passes 3-5: rank copies of the SAME weapon against each other. Keep every
+    # copy that carries its own value (protected / god roll / sole-source, or a
+    # meaningfully different roll). A copy is a safe DISMANTLE only when some kept
+    # copy strictly covers it: same-or-superset behavioural perks AND same-or-
+    # higher gear tier. Distinct rolls (a unique perk, or a better chassis) never
+    # auto-dismantle -- they fall to REVIEW for a human call.
+    def signal(w):
+        return w["prot"] or w["godroll"] or bool(w["sole"])
+    def rank(w):
+        return (w["prot"], w["godroll"], bool(w["sole"]),
+                len(w["pool"]), (w["tier"] or 0))
+    def valued(w):
+        return w["pool"] & VALUED_PERKS
+    def covered_by(c, kept):
+        # Exotics (tier 6) are frequently random-rolled (Ergo Sum frames, etc.)
+        # and their distinguishing perk often isn't in TRAIT_PERKS, so behavioural
+        # subsetting would wrongly collapse distinct frames. For exotics we only
+        # treat a byte-identical roll as a true duplicate; distinct exotic rolls
+        # fall through to REVIEW. Legendaries are covered when a kept copy CAN roll
+        # every VALUED perk this copy can (pool subset) at >= gear tier — compared
+        # on the can-roll pool, so a copy is only trashed when a kept copy truly
+        # matches its full capability, never merely its currently-slotted perk.
+        for k in kept:
+            if c is k:
+                continue
+            if c["tier"] == 6:
+                if c["sig"] == k["sig"]:
+                    return True
+            elif valued(c) <= valued(k) and (c["tier"] or 0) <= (k["tier"] or 0):
+                return True
+        return False
+
     keep, dismantle, review = [], [], []
-    groups = defaultdict(list)
+    by_name = defaultdict(list)
     for w in weapons:
-        groups[(w["name"], w["sig"])].append(w)
-    for (nm, sig), grp in groups.items():
-        # representative = protected first, then has-a-reason, then highest tier
-        grp.sort(key=lambda w: (not w["prot"], w["reason"] is None, -(w["tier"] or 0)))
-        rep, extras = grp[0], grp[1:]
-        if extras:  # >1 identical copy: keep one, the rest are exact-dup candidates
-            rep["reason"] = rep["reason"] or ("kept 1 of %d identical" % len(grp))
-            keep.append(rep)
-            for w in extras:
-                if w["prot"] or (w["reason"] and w["reason"].startswith("only source")):
-                    keep.append(w)                       # never dismantle a protected/sole copy
-                elif rep["tier"] == 6:
-                    w["reason"] = "duplicate exotic (keep 1)"
-                    review.append(w)                     # exotics -> review (Ergo Sum etc.)
+        by_name[w["name"]].append(w)
+
+    for nm, grp in by_name.items():
+        grp.sort(key=rank, reverse=True)   # best copy first
+        n = len(grp)
+        kept = []                          # copies we've decided to keep in this group
+        for i, w in enumerate(grp):
+            if i == 0:                     # best copy of this weapon -> always survives
+                # keep the keeper if it carries a signal OR is an exotic (Pass 3:
+                # never drop your last copy of an exotic); else it's your call.
+                if signal(w) or w["tier"] == 6:
+                    keep.append(w)
                 else:
-                    w["reason"] = "exact duplicate roll"
-                    dismantle.append(w)                  # only truly identical legendaries
-        else:  # single copy
-            if rep["reason"]:
-                keep.append(rep)
-            else:
-                rep["reason"] = "no god-roll / coverage match"
-                review.append(rep)                       # conservative: your call, not auto-dismantle
+                    w["reason"] = ("best of %d copies - keep or trim (your call)" % n
+                                   if n > 1 else "no god-roll / coverage match")
+                    review.append(w)
+                kept.append(w)
+            elif signal(w):                # a distinct valuable copy (god roll / sole / protected)
+                keep.append(w); kept.append(w)
+            elif covered_by(w, kept):      # a kept copy already covers this roll -> safe to trash
+                tag = "exotic " if w["tier"] == 6 else ""
+                if w["pool"] and not (w["pool"] & VALUED_PERKS):
+                    w["reason"] = "%sfiller perk only - kept a better copy" % tag
+                else:
+                    w["reason"] = "%sworse/dup roll - kept a better copy" % tag
+                dismantle.append(w)
+            else:                          # meaningfully different roll -> your call
+                w["reason"] = "distinct roll of %s - your call" % nm
+                review.append(w); kept.append(w)
 
     print("\n===== VAULT CLEANUP (%d weapons) =====" % len(weapons))
     print("  KEEP:      %d" % len(keep))
-    print("  DISMANTLE: %d   (exact-duplicate rolls only)" % len(dismantle))
+    print("  DISMANTLE: %d   (worse/dup rolls — a better copy is always kept)" % len(dismantle))
     print("  REVIEW:    %d   (your call — nothing auto-dismantled here)" % len(review))
 
-    print("\n----- DISMANTLE (safe: identical duplicates) -----")
+    print("\n----- DISMANTLE (safe: a better copy of each is kept) -----")
     for w in sorted(dismantle, key=lambda w: w["name"])[:60]:
         print("  [DISMANTLE] %-26s %-9s | %s" % (w["name"][:26], w["loc"], w["reason"]))
     if len(dismantle) > 60:
@@ -524,7 +634,9 @@ def cmd_scan(do_lock=False):
 
     def row(w):
         return {"name": w["name"], "loc": w["loc"], "id": w["iid"],
-                "reason": w["reason"], "perks": sorted(w["traits"])}
+                "reason": w["reason"], "perks": sorted(w["traits"]),
+                "can_roll": sorted(w["pool"]), "all_perks": sorted(w["perks"]),
+                "tier": w["tier"]}
     report = {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "summary": {"weapons": len(weapons), "keep": len(keep),
@@ -537,27 +649,531 @@ def cmd_scan(do_lock=False):
     print("\nFull report saved to vault_report.json")
 
     if do_lock:
-        _lock_keepers(token, mtype, keep, prof)
+        # Lock everything we are NOT dismantling (KEEP + REVIEW) so that the only
+        # unlocked weapons left in the vault are the DISMANTLE candidates -- making
+        # an in-game "dismantle everything unlocked" pass safe.
+        _lock_keepers(token, mtype, keep + review, prof)
+
+def _any_char_id(prof):
+    """Any characterId from the profile. SetLockState needs a character even for
+    vault items; we don't fetch component 200, so derive it from whatever
+    character-keyed component we do have."""
+    for comp in ("characters", "characterEquipment", "characterInventories",
+                 "characterLoadouts"):
+        d = prof.get(comp, {}).get("data", {})
+        if d:
+            return next(iter(d))
+    return None
+
+def _item_char_map(prof):
+    """instanceId -> characterId it lives on. SetLockState on an EQUIPPED or
+    character-held item must use *that* character's id; issuing it against a
+    different character returns 'item not found'. Vault items aren't in here and
+    fall back to any character."""
+    m = {}
+    for comp in ("characterEquipment", "characterInventories"):
+        for cid, invd in prof.get(comp, {}).get("data", {}).items():
+            for it in invd.get("items", []):
+                if it.get("itemInstanceId"):
+                    m[it["itemInstanceId"]] = cid
+    return m
+
+def cmd_unlock_all():
+    """Unlock every currently-locked WEAPON (clean slate before re-locking).
+    Reversible and non-destructive -- this never dismantles anything."""
+    token, _ = get_token()
+    mtype, mid, prof = fetch_profile(token)
+    default_char = _any_char_id(prof)
+    if not default_char:
+        die("No character found to issue unlock command.")
+    char_of = _item_char_map(prof)   # equipped/held items must unlock via their own char
+
+    raw = [("Vault", it) for it in
+           prof.get("profileInventory", {}).get("data", {}).get("items", [])]
+    for cid, invd in prof.get("characterInventories", {}).get("data", {}).items():
+        raw += [("Char " + cid[-4:], it) for it in invd.get("items", [])]
+    for cid, invd in prof.get("characterEquipment", {}).get("data", {}).items():
+        raw += [("Equip " + cid[-4:], it) for it in invd.get("items", [])]
+
+    locked = []
+    for loc, it in raw:
+        iid = it.get("itemInstanceId")
+        if not iid or not (it.get("state", 0) & 1):   # state flag 1 = Locked
+            continue
+        if item_meta(it["itemHash"]).get("itemType") != 3:   # weapons only
+            continue
+        locked.append((loc, iid, item_meta(it["itemHash"])["name"]))
+    _flush_caches()
+
+    print("Found %d currently-locked weapons." % len(locked))
+    if not locked:
+        print("Nothing to do -- vault weapons are already all unlocked.")
+        return
+    print("This will UNLOCK all of them (reversible; nothing is dismantled).")
+    if input("Type 'yes' to unlock all: ").strip().lower() != "yes":
+        print("Aborted. Nothing changed.")
+        return
+    ok = fail = 0
+    for loc, iid, name in locked:
+        body = {"state": False, "itemId": iid,
+                "characterId": char_of.get(iid, default_char),
+                "membershipType": mtype}
+        resp = api_action("/Destiny2/Actions/Items/SetLockState/", body, token)
+        if resp.get("ErrorCode") == 1:
+            ok += 1
+        else:
+            fail += 1
+            print("  FAILED %-24s %s" % (name[:24], resp.get("Message")))
+    print("Unlocked %d/%d weapons (%d failed)." % (ok, len(locked), fail))
 
 def _lock_keepers(token, mtype, keepers, prof):
-    chars = list(prof.get("characters", {}).get("data", {}).keys())
-    char_id = chars[0] if chars else None
-    if not char_id:
+    default_char = _any_char_id(prof)
+    if not default_char:
         die("No character found to issue lock command.")
-    print("\nAbout to LOCK %d keeper items via the API." % len(keepers))
+    char_of = _item_char_map(prof)   # equipped/held items must lock via their own char
+    print("\nAbout to LOCK %d items via the API (keepers + review)." % len(keepers))
     if input("Type 'yes' to proceed: ").strip().lower() != "yes":
         print("Aborted. Nothing locked.")
         return
-    ok = 0
+    ok = fail = 0
     for w in keepers:
         body = {"state": True, "itemId": w["iid"],
-                "characterId": char_id, "membershipType": mtype}
-        try:
-            api_post("/Destiny2/Actions/Items/SetLockState/", body, token)
+                "characterId": char_of.get(w["iid"], default_char),
+                "membershipType": mtype}
+        resp = api_action("/Destiny2/Actions/Items/SetLockState/", body, token)
+        if resp.get("ErrorCode") == 1:
             ok += 1
-        except SystemExit:
-            print("  FAILED to lock: %s" % w["name"])
-    print("Locked %d/%d keepers." % (ok, len(keepers)))
+        else:
+            fail += 1
+            print("  FAILED %-24s %s" % (w["name"][:24], resp.get("Message")))
+    print("Locked %d/%d items (%d failed)." % (ok, len(keepers), fail))
+
+# ---------------------------------------------------------------------------
+# armor: scan + build ranking  (Armor 3.0 — see DESTINY_REFERENCE.md sec 8-9)
+# ---------------------------------------------------------------------------
+# Stat names are resolved LIVE from the manifest (Intellect->Super,
+# Discipline->Grenade, Strength->Melee, Recovery->Class, Mobility->Weapons,
+# Resilience->Health) so we never hardcode a stale hash->name mapping.
+ARMOR_SLOTS = {26: "Helmet", 27: "Gauntlets", 28: "Chest", 29: "Legs", 30: "Class Item"}
+ARMOR_STATS = {"Weapons", "Health", "Class", "Grenade", "Super", "Melee"}
+# build key -> (primary stat, secondary stat). Primary is always Super here.
+BUILDS = {
+    "super-class":   ("Super", "Class"),
+    "super-grenade": ("Super", "Grenade"),
+    "super-melee":   ("Super", "Melee"),
+}
+ADEF_CACHE = os.path.join(HERE, ".armor_defs_cache.json")
+_adefs = None
+
+def armor_meta(hash_):
+    """Cached armor def: {name, itemType, subType, classType, tier}. Kept in a
+    SEPARATE cache from the weapon def cache, which only stored 4 fields and would
+    otherwise return None for subType/classType on already-cached hashes."""
+    global _adefs
+    if _adefs is None:
+        _adefs = load_json(ADEF_CACHE, {})
+    k = str(hash_)
+    if k in _adefs:
+        return _adefs[k]
+    try:
+        d = api_get("/Destiny2/Manifest/DestinyInventoryItemDefinition/%s/" % hash_)
+    except SystemExit:
+        d = {}
+    _adefs[k] = {
+        "name": d.get("displayProperties", {}).get("name", str(hash_)),
+        "itemType": d.get("itemType"),
+        "subType": d.get("itemSubType"),
+        "classType": d.get("classType"),
+        "tier": d.get("inventory", {}).get("tierType"),
+    }
+    _mark_dirty(ADEF_CACHE, _adefs)
+    return _adefs[k]
+
+_statname = {}
+def stat_name(hash_):
+    if hash_ not in _statname:
+        _statname[hash_] = def_name("DestinyStatDefinition", hash_)
+    return _statname[hash_]
+
+def fetch_armor_profile(token):
+    mtype, mid, name = get_membership(token)
+    # 200 characters, 102 vault, 201 char inv, 205 equipped, 300 instances
+    # (gearTier), 304 item stats, 206 loadouts
+    comps = "200,102,201,205,300,304,206"
+    prof = api_get("/Destiny2/%s/Profile/%s/?components=%s" % (mtype, mid, comps), token)
+    return mtype, mid, name, prof
+
+def collect_armor(prof):
+    """Return list of armor piece dicts with per-stat values + current location.
+    owner = character id that holds it, or None if in the vault."""
+    stats_data = prof.get("itemComponents", {}).get("stats", {}).get("data", {})
+    inst_data = prof.get("itemComponents", {}).get("instances", {}).get("data", {})
+    raw = []
+    for it in prof.get("profileInventory", {}).get("data", {}).get("items", []):
+        raw.append((it, None, False))
+    for cid, inv in prof.get("characterInventories", {}).get("data", {}).items():
+        for it in inv.get("items", []):
+            raw.append((it, cid, False))
+    for cid, inv in prof.get("characterEquipment", {}).get("data", {}).items():
+        for it in inv.get("items", []):
+            raw.append((it, cid, True))
+
+    out = []
+    for it, owner, equipped in raw:
+        iid = it.get("itemInstanceId")
+        if not iid:
+            continue
+        m = armor_meta(it["itemHash"])
+        if m.get("itemType") != 2:
+            continue  # armor only
+        slot = ARMOR_SLOTS.get(m.get("subType"))
+        if not slot:
+            continue  # skip ghosts / non-gear type-2 items
+        s = {}
+        for sh, sv in stats_data.get(iid, {}).get("stats", {}).items():
+            nm = stat_name(int(sh))
+            if nm in ARMOR_STATS:
+                s[nm] = sv.get("value", 0)
+        if not s:
+            continue
+        top = sorted(s.items(), key=lambda x: -x[1])
+        out.append({
+            "name": m["name"], "hash": it["itemHash"], "iid": iid,
+            "slot": slot, "classType": m.get("classType"),
+            "exotic": m.get("tier") == 6, "owner": owner, "equipped": equipped,
+            "stats": s, "total": sum(s.values()),
+            # gearTier is the Armor Gear Tier (1-5; 0 = legacy/pre-tier armor) —
+            # NOT rarity. Read from the instance component, not the item def.
+            "gt": inst_data.get(iid, {}).get("gearTier", 0),
+            "top2": {top[0][0], top[1][0]},   # archetype = two highest stats
+        })
+    return out
+
+def _score(p, primary, sec):
+    return p["stats"].get(primary, 0) + p["stats"].get(sec, 0)
+
+def pick_build(pieces, class_type, primary, sec):
+    """Choose the best wearable loadout: best legendary per slot, then the single
+    slot whose exotic gives the biggest score gain (only one exotic can be worn).
+    Returns (chosen: {slot: piece}, exotic_slot)."""
+    cls = [p for p in pieces if p["classType"] == class_type]
+    best_leg, best_exo = {}, {}
+    for slot in ARMOR_SLOTS.values():
+        cands = [p for p in cls if p["slot"] == slot]
+        legs = [p for p in cands if not p["exotic"]]
+        exos = [p for p in cands if p["exotic"]]
+        if legs:
+            best_leg[slot] = max(legs, key=lambda p: (_score(p, primary, sec), p["total"]))
+        if exos:
+            best_exo[slot] = max(exos, key=lambda p: (_score(p, primary, sec), p["total"]))
+    slots = list(ARMOR_SLOTS.values())
+    best, best_val = None, -1
+    for eslot in slots:
+        if eslot not in best_exo:
+            continue
+        combo = dict(best_leg)
+        combo[eslot] = best_exo[eslot]
+        if len(combo) < len(slots):
+            continue  # missing a legendary in some slot; skip
+        val = sum(_score(combo[s], primary, sec) for s in slots)
+        if val > best_val:
+            best_val, best = val, (combo, eslot)
+    # fallback: no full legendary set -> just take best of any per slot
+    if best is None:
+        combo = {}
+        for slot in slots:
+            cands = [p for p in cls if p["slot"] == slot]
+            if cands:
+                combo[slot] = max(cands, key=lambda p: (_score(p, primary, sec), p["total"]))
+        return combo, None
+    return best
+
+CLASS_BY_NAME = {"titan": 0, "hunter": 1, "warlock": 2}
+
+def _print_build(combo, exotic_slot, primary, sec):
+    order = ["Weapons", "Health", "Class", "Grenade", "Super", "Melee"]
+    tp = ts = 0
+    for slot in ARMOR_SLOTS.values():
+        p = combo.get(slot)
+        if not p:
+            print("   %-11s (none found)" % slot); continue
+        tp += p["stats"].get(primary, 0); ts += p["stats"].get(sec, 0)
+        body = " ".join("%s%d" % (k[0], p["stats"].get(k, 0)) for k in order)
+        mark = "*" if slot == exotic_slot else " "
+        loc = "equipped" if p["equipped"] else ("vault" if p["owner"] is None else "char")
+        print("  %s %-11s %-26s %s%2d/%s%2d  tot%3d  [%s]%s %s" % (
+            mark, slot, p["name"][:26], primary[:2], p["stats"].get(primary, 0),
+            sec[:3], p["stats"].get(sec, 0), p["total"],
+            "EXOTIC" if p["exotic"] else "leg", "", loc))
+    print("   ---- set totals: %s=%d  %s=%d  (raw armor, pre mods/fragments)" %
+          (primary, tp, sec, ts))
+
+def cmd_armor_scan(build=None):
+    token, _ = get_token()
+    mtype, mid, name, prof = fetch_armor_profile(token)
+    pieces = collect_armor(prof)
+    _flush_caches()
+    save_json(os.path.join(HERE, "armor_report.json"),
+              {"account": name, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "pieces": pieces})
+    # which classes actually own armor
+    by_cls = {}
+    for p in pieces:
+        by_cls[p["classType"]] = by_cls.get(p["classType"], 0) + 1
+    print("Account: %s  |  armor pieces: %d" % (name, len(pieces)))
+    for ct, n in sorted(by_cls.items(), key=lambda kv: -kv[1]):
+        print("  %-7s: %d" % (CLASS_TYPES.get(ct, ct), n))
+    main_cls = max(by_cls, key=by_cls.get) if by_cls else 2
+    builds = [build] if build else list(BUILDS)
+    for bk in builds:
+        primary, sec = BUILDS[bk]
+        combo, eslot = pick_build(pieces, main_cls, primary, sec)
+        print("\n===== %s  (%s, best 1-exotic loadout) =====" % (bk, CLASS_TYPES.get(main_cls)))
+        _print_build(combo, eslot, primary, sec)
+    print("\nSaved armor_report.json")
+
+# ---------------------------------------------------------------------------
+# armor: keep/dismantle cleanup  (Warlock; owner's ability-focus policy)
+# ---------------------------------------------------------------------------
+DESIRED_STATS = {"Super", "Class", "Grenade", "Melee"}  # owner's ability-focus stats
+
+def classify_armor(pieces, protected):
+    """Warlock keep/dismantle per owner policy: keep tier-4+ 'pure-ability'
+    legendaries (top-2 stats both in DESIRED_STATS) + the best copy of each
+    exotic; dismantle tier<4, off-stat (Health/Weapons-forward), and same-
+    archetype exotic dupes; distinct exotic archetypes + exotic class items go to
+    REVIEW. Off-class (non-Warlock) pieces are returned separately, untouched.
+    Uses the real armor gearTier (p['gt']), not rarity."""
+    from collections import defaultdict
+    keep, dismantle, review, offclass = [], [], [], []
+    warlock = []
+    for p in pieces:
+        p["prot"] = p["iid"] in protected
+        (offclass if p["classType"] != 2 else warlock).append(p)
+    groups = defaultdict(list)
+    for p in (x for x in warlock if x["exotic"]):
+        groups[p["name"]].append(p)
+    for nm, grp in groups.items():
+        if grp[0]["slot"] == "Class Item":       # perk combos vary -> your call
+            for p in grp:
+                p["reason"] = "exotic class item - perk combos vary (review)"
+                review.append(p)
+            continue
+        grp.sort(key=lambda p: (p["prot"], p["gt"], p["total"]), reverse=True)
+        best = grp[0]
+        best["reason"] = "exotic - best copy kept (gt%d, %d tot)" % (best["gt"], best["total"])
+        keep.append(best)
+        for p in grp[1:]:
+            if p["prot"]:
+                p["reason"] = "exotic (equipped/loadout)"; keep.append(p)
+            elif p["top2"] == best["top2"]:
+                p["reason"] = "duplicate exotic - kept a better copy"; dismantle.append(p)
+            else:                                 # different build, not a dupe
+                p["reason"] = "distinct exotic archetype (%s) - your call" % "+".join(sorted(p["top2"]))
+                review.append(p)
+    for p in (x for x in warlock if not x["exotic"]):
+        if p["prot"]:
+            p["reason"] = "equipped / in loadout"; keep.append(p)
+        elif p["gt"] < 4:
+            p["reason"] = ("tier %d (<4)" % p["gt"]) if p["gt"] else "legacy (no tier)"
+            dismantle.append(p)
+        elif not (p["top2"] <= DESIRED_STATS):
+            lead = "Health" if "Health" in p["top2"] else "Weapons"
+            p["reason"] = "%s-forward (top2 %s)" % (lead, "+".join(sorted(p["top2"])))
+            dismantle.append(p)
+        else:
+            p["reason"] = "tier %d %s" % (p["gt"], "+".join(sorted(p["top2"])))
+            keep.append(p)
+    return keep, dismantle, review, offclass
+
+def cmd_armor_cleanup(do_lock=False):
+    token, _ = get_token()
+    mtype, mid, name, prof = fetch_armor_profile(token)
+    pieces = collect_armor(prof)
+    _flush_caches()
+    protected = set()
+    for _cid, invd in prof.get("characterEquipment", {}).get("data", {}).items():
+        for it in invd.get("items", []):
+            if it.get("itemInstanceId"):
+                protected.add(it["itemInstanceId"])
+    for _cid, cl in prof.get("characterLoadouts", {}).get("data", {}).items():
+        for lo in cl.get("loadouts", []):
+            for it in lo.get("items", []):
+                if it.get("itemInstanceId", "0") != "0":
+                    protected.add(it["itemInstanceId"])
+    keep, dismantle, review, offclass = classify_armor(pieces, protected)
+
+    print("\n===== WARLOCK ARMOR CLEANUP (%d pieces; %d off-class skipped) =====" %
+          (len(keep) + len(dismantle) + len(review), len(offclass)))
+    print("  KEEP:      %d" % len(keep))
+    print("  DISMANTLE: %d   (tier<4 / off-stat / dup exotic)" % len(dismantle))
+    print("  REVIEW:    %d   (exotic class items + distinct exotic rolls)" % len(review))
+    print("\n----- DISMANTLE -----")
+    for p in sorted(dismantle, key=lambda p: p["slot"])[:60]:
+        print("  [DISMANTLE] %-24s %-11s | %s" % (p["name"][:24], p["slot"], p["reason"]))
+    if len(dismantle) > 60:
+        print("  ...and %d more (see armor_cleanup_report.json)" % (len(dismantle) - 60))
+
+    def row(p):
+        return {"name": p["name"], "iid": p["iid"], "slot": p["slot"],
+                "exotic": p["exotic"], "gt": p["gt"], "total": p["total"],
+                "reason": p["reason"]}
+    save_json(os.path.join(HERE, "armor_cleanup_report.json"), {
+        "account": name, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "summary": {"keep": len(keep), "dismantle": len(dismantle),
+                    "review": len(review), "off_class": len(offclass)},
+        "keep": [row(p) for p in keep], "dismantle": [row(p) for p in dismantle],
+        "review": [row(p) for p in review]})
+    print("\nSaved armor_cleanup_report.json")
+
+    if do_lock:
+        _apply_armor_locks(token, mtype, prof, keep + review, offclass, dismantle)
+
+def _apply_armor_locks(token, mtype, prof, survivors, offclass, dismantle):
+    """Lock survivors (keep+review) and off-class pieces (protect), unlock the
+    dismantle candidates -- so an in-game 'dismantle everything unlocked' hits
+    only the flagged pieces. Off-class armor is protected, not classified."""
+    default_char = _any_char_id(prof)
+    if not default_char:
+        die("No character found to issue lock command.")
+    char_of = _item_char_map(prof)
+    lock_list = survivors + offclass
+    print("\nAbout to LOCK %d armor (keep+review+off-class) and UNLOCK %d dismantle "
+          "candidates via the API." % (len(lock_list), len(dismantle)))
+    if input("Type 'yes' to proceed: ").strip().lower() != "yes":
+        print("Aborted. Nothing changed."); return
+    def setlock(iid, state):
+        body = {"state": state, "itemId": iid,
+                "characterId": char_of.get(iid, default_char), "membershipType": mtype}
+        return api_action("/Destiny2/Actions/Items/SetLockState/", body, token).get("ErrorCode") == 1
+    lok = sum(setlock(p["iid"], True) for p in lock_list)
+    uok = sum(setlock(p["iid"], False) for p in dismantle)
+    print("Locked %d/%d (keep+review+off-class), unlocked %d/%d (dismantle)." %
+          (lok, len(lock_list), uok, len(dismantle)))
+
+# ---------------------------------------------------------------------------
+# armor: transfer + equip + loadout snapshot  (live game-state writes)
+# ---------------------------------------------------------------------------
+
+def _transfer(token, mtype, item_hash, iid, character_id, to_vault):
+    body = {"itemReferenceHash": item_hash, "stackSize": 1,
+            "transferToVault": to_vault, "itemId": iid,
+            "characterId": character_id, "membershipType": mtype}
+    r = api_action("/Destiny2/Actions/Items/TransferItem/", body, token)
+    return r.get("ErrorCode") == 1, r.get("ErrorStatus"), r.get("Message")
+
+def plan_equip(combo, target_id):
+    """Build the ordered list of (action, piece) needed to get every piece onto
+    target_id and equipped. Actions: 'skip' (already equipped), 'equip' (on char),
+    'v2c' (vault->char), 'c2v2c' (other char->vault->char), 'blocked' (equipped
+    on another character — needs manual unequip)."""
+    steps = []
+    for slot in ARMOR_SLOTS.values():
+        p = combo.get(slot)
+        if not p:
+            continue
+        if p["owner"] == target_id and p["equipped"]:
+            steps.append(("skip", p))
+        elif p["owner"] == target_id:
+            steps.append(("equip", p))
+        elif p["owner"] is None:
+            steps.append(("v2c", p))
+        elif p["equipped"]:
+            steps.append(("blocked", p))
+        else:
+            steps.append(("c2v2c", p))
+    return steps
+
+def cmd_equip_armor(build, dry_run=False, do_snapshot_slot=None):
+    if build not in BUILDS:
+        die("Unknown build '%s'. Choose: %s" % (build, ", ".join(BUILDS)))
+    primary, sec = BUILDS[build]
+    token, _ = get_token()
+    mtype, mid, name, prof = fetch_armor_profile(token)
+    pieces = collect_armor(prof)
+    _flush_caches()
+    chars = prof.get("characters", {}).get("data", {})
+    # target = the character whose class matches the build's owning class (main = most armor)
+    by_cls = {}
+    for p in pieces:
+        by_cls[p["classType"]] = by_cls.get(p["classType"], 0) + 1
+    target_cls = max(by_cls, key=by_cls.get) if by_cls else 2
+    target_id = next((cid for cid, ch in chars.items()
+                      if ch.get("classType") == target_cls), None)
+    if not target_id:
+        die("No character found for class %s." % CLASS_TYPES.get(target_cls))
+
+    combo, eslot = pick_build(pieces, target_cls, primary, sec)
+    steps = plan_equip(combo, target_id)
+
+    print("=== EQUIP PLAN: %s onto %s (char ...%s) ===" %
+          (build, CLASS_TYPES.get(target_cls), target_id[-4:]))
+    _print_build(combo, eslot, primary, sec)
+    print("\nActions:")
+    verbs = {"skip": "already equipped, skip", "equip": "equip (already on char)",
+             "v2c": "vault -> character, then equip",
+             "c2v2c": "other char -> vault -> character, then equip",
+             "blocked": "EQUIPPED ON ANOTHER CHARACTER — unequip it in-game first"}
+    for act, p in steps:
+        print("  - %-9s %-26s : %s" % (p["slot"], p["name"][:26], verbs[act]))
+    if any(a == "blocked" for a, _ in steps):
+        print("\n! One or more pieces are equipped on another character. Unequip them "
+              "in-game (equip something else there) and re-run.")
+    if do_snapshot_slot is not None:
+        los = prof.get("characterLoadouts", {}).get("data", {}).get(target_id, {}).get("loadouts", [])
+        cur = "(empty)"
+        if 0 <= do_snapshot_slot - 1 < len(los):
+            lo = los[do_snapshot_slot - 1]
+            cur = (def_name("DestinyLoadoutNameDefinition", lo["nameHash"])
+                   if lo.get("nameHash") else "(unnamed)")
+        print("\nThen SNAPSHOT the equipped kit into loadout slot %d (currently: %s)." %
+              (do_snapshot_slot, cur))
+        print("! Snapshot captures your WHOLE equipped set (weapons + subclass + armor),"
+              " not just these 5 pieces.")
+
+    if dry_run:
+        print("\n[dry-run] No changes made.")
+        return
+    print("\nThis writes to your live character. You must be IN ORBIT or a social space"
+          " (not in an activity).")
+    if input("Type 'yes' to proceed: ").strip().lower() != "yes":
+        print("Aborted. Nothing changed.")
+        return
+
+    # 1) get every piece onto the target character
+    for act, p in steps:
+        if act in ("skip", "equip"):
+            continue
+        if act == "blocked":
+            print("  SKIP %s (equipped elsewhere)" % p["name"]); continue
+        if act == "c2v2c":
+            ok, st, msg = _transfer(token, mtype, p["hash"], p["iid"], p["owner"], True)
+            if not ok:
+                print("  FAIL move-to-vault %s: %s %s" % (p["name"], st, msg)); continue
+        ok, st, msg = _transfer(token, mtype, p["hash"], p["iid"], target_id, False)
+        if not ok:
+            print("  FAIL move-to-char %s: %s %s" % (p["name"], st, msg)); continue
+        print("  moved %s -> character" % p["name"])
+    # 2) equip everything (skip pieces still not on the character)
+    equip_ids = [p["iid"] for act, p in steps if act != "blocked"]
+    body = {"itemIds": equip_ids, "characterId": target_id, "membershipType": mtype}
+    r = api_action("/Destiny2/Actions/Items/EquipItems/", body, token)
+    if r.get("ErrorCode") != 1:
+        print("  EquipItems error: %s %s" % (r.get("ErrorStatus"), r.get("Message")))
+    for res in r.get("Response", {}).get("equipResults", []):
+        code = res.get("equipStatus")
+        tag = "OK" if code == 1 else ("err %s" % code)
+        print("  equip %s: %s" % (res.get("itemInstanceId"), tag))
+    # 3) optional loadout snapshot
+    if do_snapshot_slot is not None:
+        sbody = {"loadoutIndex": do_snapshot_slot - 1,
+                 "characterId": target_id, "membershipType": mtype}
+        sr = api_action("/Destiny2/Actions/Loadouts/SnapshotLoadout/", sbody, token)
+        if sr.get("ErrorCode") == 1:
+            print("  snapshotted into loadout slot %d" % do_snapshot_slot)
+        else:
+            print("  snapshot error: %s %s" % (sr.get("ErrorStatus"), sr.get("Message")))
+    print("Done.")
 
 # ---------------------------------------------------------------------------
 # entry
@@ -577,6 +1193,35 @@ def main():
         cmd_scan(do_lock=False)
     elif cmd == "lock-keepers":
         cmd_scan(do_lock=True)
+    elif cmd == "unlock-all":
+        cmd_unlock_all()
+    elif cmd == "armor-scan":
+        build = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else None
+        if build and build not in BUILDS:
+            die("Unknown build '%s'. Choose: %s" % (build, ", ".join(BUILDS)))
+        cmd_armor_scan(build)
+    elif cmd == "armor-cleanup":
+        cmd_armor_cleanup(do_lock="--lock" in sys.argv)
+    elif cmd in ("equip-armor", "apply-loadout"):
+        args = sys.argv[2:]
+        dry = "--dry-run" in args
+        args = [a for a in args if a != "--dry-run"]
+        if not args:
+            die("Usage: %s <build> %s" % (
+                cmd, "<slot 1-10>" if cmd == "apply-loadout" else "[--loadout N] [--dry-run]"))
+        build = args[0]
+        slot = None
+        if cmd == "apply-loadout":
+            if len(args) < 2 or not args[1].isdigit():
+                die("apply-loadout needs a loadout slot 1-10, e.g. apply-loadout %s 3" % build)
+            slot = int(args[1])
+        elif "--loadout" in sys.argv:
+            i = sys.argv.index("--loadout")
+            if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit():
+                slot = int(sys.argv[i + 1])
+        if slot is not None and not (1 <= slot <= 10):
+            die("Loadout slot must be 1-10.")
+        cmd_equip_armor(build, dry_run=dry, do_snapshot_slot=slot)
     else:
         print(__doc__)
 

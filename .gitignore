@@ -8,11 +8,15 @@ preferences.yaml
 # ==== Personal output — reveals your inventory ====
 vault_report.json
 VAULT_REPORT.md
+armor_report.json
+armor_cleanup_report.json
 
 # ==== Generated / cached ====
-# .manifest_cache.json / .weapon_defs_cache.json are rebuilt on demand from the Bungie manifest
+# .manifest_cache.json / .weapon_defs_cache.json / .armor_defs_cache.json are
+# rebuilt on demand from the Bungie manifest
 .manifest_cache.json
 .weapon_defs_cache.json
+.armor_defs_cache.json
 __pycache__/
 *.py[cod]
 
