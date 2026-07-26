@@ -38,6 +38,11 @@ Only **exotics** and **curated** rolls come back from Collections. Build rules c
 - **Monument of Triumph** (2026-06-09, Update 9.7.0): FINAL major update — weapon tier-upgrading for
   world drops, ~25 new catalysts, set bonuses on every set, exotic armor → Tier 5.
 
+> **Artifacts reworked ("Artifact 2.0"):** all 7 past seasonal artifacts are now permanently
+> selectable (one active **per loadout**), 7 tiered mod slots each, and **anti-champion moved onto
+> weapon frames** (freeing artifact slots for damage/utility). This is NOT in the training baseline —
+> see **`research/artifacts.md`** before giving any artifact/perk advice.
+
 ---
 
 # PART I — WEAPONS
