@@ -237,7 +237,7 @@ non-Stasis builds.**
 **Tier 2**
 - **Unraveling Orbs** — Picking up an Orb of Power or a Tangle grants your Strand weapons Unraveling Rounds.
 - **Pillar of Ice** — Defeating a frozen target spawns Stasis Crystals.
-- **Revitalizing Blast** — Damaging a Champion or boss with a Solar ability applies Weaken (~15%/6s).
+- **Revitalizing Blast** — Stunning a Champion causes it to Ignite and clears your shield stun.
 - **Anti-Champion Nosecone** — Rocket Launchers deal increased damage to Champions.
 - **Dragon's Bite** — Breaking a combatant's shield with a Strand/Stasis weapon can Suspend/Freeze it (PvE, ~20% chance).
 - **Creeping Chill** — Stasis-weapon final blows on slowed/frozen targets release a Slowing burst.
