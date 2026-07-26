@@ -498,6 +498,7 @@ def _collect_weapons(prof, sockets_data, reuse_data, protected):
             "traits": set(perks) & TRAIT_PERKS,   # currently-slotted behavioural perks
             "pool": set(pool) & TRAIT_PERKS,       # everything it CAN roll (drives decisions)
             "prot": iid in protected,
+            "crafted": bool(it.get("state", 0) & 8),  # state flag 8 = Crafted -> never dismantle
             "reason": None,
         })
     return weapons
@@ -543,6 +544,8 @@ def cmd_scan(do_lock=False):
         w["sole"] = sorted(p for p in w["pool"] if len(sources[p]) == 1)
         if w["prot"]:
             w["reason"] = "in loadout / equipped"
+        elif w["crafted"]:
+            w["reason"] = "crafted (never dismantle)"
         elif w["godroll"]:
             w["reason"] = "god roll"
         elif w["sole"]:
@@ -557,9 +560,9 @@ def cmd_scan(do_lock=False):
     # higher gear tier. Distinct rolls (a unique perk, or a better chassis) never
     # auto-dismantle -- they fall to REVIEW for a human call.
     def signal(w):
-        return w["prot"] or w["godroll"] or bool(w["sole"])
+        return w["prot"] or w["crafted"] or w["godroll"] or bool(w["sole"])
     def rank(w):
-        return (w["prot"], w["godroll"], bool(w["sole"]),
+        return (w["prot"], w["crafted"], w["godroll"], bool(w["sole"]),
                 len(w["pool"]), (w["tier"] or 0))
     def valued(w):
         return w["pool"] & VALUED_PERKS

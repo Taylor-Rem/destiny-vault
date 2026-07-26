@@ -18,7 +18,10 @@ An item is **KEEP** if any pass keeps it; otherwise it falls through to DISMANTL
 
 **Pass 0 — Never touch (hard protect)**
 - Anything equipped in an in-game **loadout** (component 206) or currently equipped.
-- Crafted weapons / weapons with a pattern you rely on (flag, don't auto-dismantle).
+- **Crafted weapons — ALWAYS KEEP & LOCK, no exceptions** (detected via item `state`
+  flag 8). Crafted rolls can't be re-obtained by pulling from Collections, so they are
+  never dismantle candidates regardless of roll. `scan` marks them "crafted (never
+  dismantle)" and `lock-keepers` locks them.
 
 **Pass 1 — God-roll KEEP**
 - Per-weapon rules (from `research/weapons-pve-perks.md`): keep if it has ≥1 perk from each desired
