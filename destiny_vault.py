@@ -26,7 +26,14 @@ USAGE
     python3 destiny_vault.py equip-armor <build> [--loadout N] [--dry-run]
     python3 destiny_vault.py apply-loadout <build> <slot 1-10> [--dry-run]
 
-    builds: super-class | super-grenade | super-melee   ("Intellect" is now Super)
+      --exotic "<name>"   pin the exotic armour piece instead of letting the
+                          stat score choose it (needed when a build REQUIRES a
+                          specific exotic, e.g. --exotic "Secant Filaments")
+      --weapon "<name>"   also transfer + equip this weapon; repeatable, max one
+                          per Kinetic/Energy/Power slot
+
+    builds: super-class | super-grenade | super-melee | class-grenade | grenade-class
+            ("Intellect" is now Super)
     equip-armor / apply-loadout write to your LIVE character (be in orbit). Add
     --dry-run to preview the transfer/equip plan without changing anything.
 
@@ -764,6 +771,11 @@ BUILDS = {
     "super-class":   ("Super", "Class"),
     "super-grenade": ("Super", "Grenade"),
     "super-melee":   ("Super", "Melee"),
+    # ability-uptime builds: no Super weighting at all. class-grenade is for
+    # rift-loop builds (Empowering Rift engines) where Grenade also scales an
+    # aspect's damage (e.g. Child of the Old Gods' Void Soul).
+    "class-grenade": ("Class", "Grenade"),
+    "grenade-class": ("Grenade", "Class"),
 }
 ADEF_CACHE = os.path.join(HERE, ".armor_defs_cache.json")
 _adefs = None
@@ -855,21 +867,101 @@ def collect_armor(prof):
 def _score(p, primary, sec):
     return p["stats"].get(primary, 0) + p["stats"].get(sec, 0)
 
-def pick_build(pieces, class_type, primary, sec):
+# Armor 3.0: a stat only pays the "enhanced" benefit above 100, and there is no
+# extra return for overshooting. A plain sum is blind to that — it rates
+# (165, 84) the same as (124, 125) — so balanced picking scores each stat only up
+# to the threshold, which drives BOTH across 100 before padding either one.
+BALANCE_TARGET = 100
+
+def _balanced_key(p, q, target=BALANCE_TARGET):
+    return (min(p, target) + min(q, target), min(p, q), p + q)
+
+def _set_totals(combo, primary, sec):
+    return (sum(x["stats"].get(primary, 0) for x in combo.values()),
+            sum(x["stats"].get(sec, 0) for x in combo.values()))
+
+def _pick_balanced(per_slot, fixed, primary, sec, topk=6):
+    """Search armor SETS instead of picking each slot greedily. Greedy-per-slot
+    can't optimise a whole-set shape like 'both stats past 100', because the best
+    single piece for one stat often starves the other. Keeps the top-k candidates
+    per slot by raw score, then brute-forces the combinations (<=k^5)."""
+    import itertools
+    slots = [s for s in per_slot if s not in fixed]
+    pools = []
+    for s in slots:
+        cands = sorted(per_slot[s],
+                       key=lambda p: (_score(p, primary, sec), p["total"]),
+                       reverse=True)[:topk]
+        if not cands:
+            return None
+        pools.append(cands)
+    best, best_key = None, None
+    for pick in itertools.product(*pools):
+        combo = dict(fixed)
+        combo.update(dict(zip(slots, pick)))
+        p, q = _set_totals(combo, primary, sec)
+        key = _balanced_key(p, q)
+        if best_key is None or key > best_key:
+            best_key, best = key, combo
+    return best
+
+def pick_build(pieces, class_type, primary, sec, pin_exotic=None, min_gt=4,
+               balance=False):
     """Choose the best wearable loadout: best legendary per slot, then the single
     slot whose exotic gives the biggest score gain (only one exotic can be worn).
-    Returns (chosen: {slot: piece}, exotic_slot)."""
+    Returns (chosen: {slot: piece}, exotic_slot).
+
+    pin_exotic: exotic armor name (case-insensitive substring). When given, that
+    exotic is forced into its slot and only its slot is considered for the exotic,
+    so a build that NEEDS a specific exotic isn't overridden by raw stat score.
+
+    min_gt: minimum armor gearTier for LEGENDARY picks, matching armor-cleanup's
+    keep threshold — without it a stat-dense but gear-tier-2 piece (low total, and
+    already flagged DISMANTLE) can out-score a tier-5 one. Falls back per slot if
+    nothing meets the bar. Never applied to the exotic, whose slot is fixed."""
     cls = [p for p in pieces if p["classType"] == class_type]
     best_leg, best_exo = {}, {}
     for slot in ARMOR_SLOTS.values():
         cands = [p for p in cls if p["slot"] == slot]
         legs = [p for p in cands if not p["exotic"]]
+        tiered = [p for p in legs if p.get("gt", 0) >= min_gt]
+        if tiered:
+            legs = tiered
         exos = [p for p in cands if p["exotic"]]
+        if pin_exotic:
+            exos = [p for p in exos if pin_exotic.lower() in p["name"].lower()]
         if legs:
             best_leg[slot] = max(legs, key=lambda p: (_score(p, primary, sec), p["total"]))
         if exos:
             best_exo[slot] = max(exos, key=lambda p: (_score(p, primary, sec), p["total"]))
+    if pin_exotic and not best_exo:
+        die("No exotic armor matching '%s' found for this class. "
+            "Check the name against `armor-cleanup` output." % pin_exotic)
     slots = list(ARMOR_SLOTS.values())
+
+    if balance:
+        per_slot = {}
+        for slot in slots:
+            legs = [p for p in cls if p["slot"] == slot and not p["exotic"]]
+            tiered = [p for p in legs if p.get("gt", 0) >= min_gt]
+            per_slot[slot] = tiered or legs
+        if pin_exotic:
+            eslot = next(iter(best_exo))
+            combo = _pick_balanced(per_slot, {eslot: best_exo[eslot]}, primary, sec)
+            if combo:
+                return combo, eslot
+        else:
+            best, best_key, best_eslot = None, None, None
+            for eslot in best_exo:
+                combo = _pick_balanced(per_slot, {eslot: best_exo[eslot]}, primary, sec)
+                if not combo:
+                    continue
+                key = _balanced_key(*_set_totals(combo, primary, sec))
+                if best_key is None or key > best_key:
+                    best_key, best, best_eslot = key, combo, eslot
+            if best:
+                return best, best_eslot
+
     best, best_val = None, -1
     for eslot in slots:
         if eslot not in best_exo:
@@ -883,12 +975,22 @@ def pick_build(pieces, class_type, primary, sec):
             best_val, best = val, (combo, eslot)
     # fallback: no full legendary set -> just take best of any per slot
     if best is None:
-        combo = {}
+        combo, eslot = {}, None
         for slot in slots:
             cands = [p for p in cls if p["slot"] == slot]
+            if pin_exotic:
+                # keep the pinned exotic in its own slot, legendaries everywhere else
+                if slot in best_exo:
+                    combo[slot] = best_exo[slot]
+                    eslot = slot
+                    continue
+                cands = [p for p in cands if not p["exotic"]]
+            tiered = [p for p in cands if p.get("gt", 0) >= min_gt]
+            if tiered:
+                cands = tiered
             if cands:
                 combo[slot] = max(cands, key=lambda p: (_score(p, primary, sec), p["total"]))
-        return combo, None
+        return combo, eslot
     return best
 
 CLASS_BY_NAME = {"titan": 0, "hunter": 1, "warlock": 2}
@@ -953,6 +1055,17 @@ def classify_armor(pieces, protected):
     for p in pieces:
         p["prot"] = p["iid"] in protected
         (offclass if p["classType"] != 2 else warlock).append(p)
+    # Rank/compare exotic copies by ABILITY-stat points (Super/Class/Grenade/Melee),
+    # not raw total. Raw total is useless here — every Tier-5 roll totals 75 (30/25/20),
+    # so ranking on it ignored the tertiary stat and could keep a roll that wastes
+    # its 20 in Weapons/Health over one that puts it in a desired stat.
+    def dvec(p):
+        return {k: p["stats"].get(k, 0) for k in DESIRED_STATS}
+    def dsum(p):
+        return sum(dvec(p).values())
+    def dominates(a, b):   # a >= b in EVERY ability stat, at >= gear tier
+        return a["gt"] >= b["gt"] and all(dvec(a)[k] >= dvec(b)[k] for k in DESIRED_STATS)
+
     groups = defaultdict(list)
     for p in (x for x in warlock if x["exotic"]):
         groups[p["name"]].append(p)
@@ -962,18 +1075,20 @@ def classify_armor(pieces, protected):
                 p["reason"] = "exotic class item - perk combos vary (review)"
                 review.append(p)
             continue
-        grp.sort(key=lambda p: (p["prot"], p["gt"], p["total"]), reverse=True)
-        best = grp[0]
-        best["reason"] = "exotic - best copy kept (gt%d, %d tot)" % (best["gt"], best["total"])
-        keep.append(best)
-        for p in grp[1:]:
-            if p["prot"]:
-                p["reason"] = "exotic (equipped/loadout)"; keep.append(p)
-            elif p["top2"] == best["top2"]:
-                p["reason"] = "duplicate exotic - kept a better copy"; dismantle.append(p)
-            else:                                 # different build, not a dupe
-                p["reason"] = "distinct exotic archetype (%s) - your call" % "+".join(sorted(p["top2"]))
-                review.append(p)
+        grp.sort(key=lambda p: (p["prot"], dsum(p), p["gt"], p["total"]), reverse=True)
+        kept = []
+        for i, p in enumerate(grp):
+            if i == 0:
+                p["reason"] = "exotic - best ability roll kept (%d in Su/Cl/Gr/Me)" % dsum(p)
+                keep.append(p); kept.append(p)
+            elif p["prot"]:
+                p["reason"] = "exotic (equipped/loadout)"; keep.append(p); kept.append(p)
+            elif any(dominates(k, p) for k in kept):
+                p["reason"] = "exotic dup - a kept copy beats it in every ability stat"
+                dismantle.append(p)
+            else:                                 # distinct useful spread -> your call
+                p["reason"] = "distinct exotic roll (%d in Su/Cl/Gr/Me) - your call" % dsum(p)
+                review.append(p); kept.append(p)
     for p in (x for x in warlock if not x["exotic"]):
         if p["prot"]:
             p["reason"] = "equipped / in loadout"; keep.append(p)
@@ -1087,7 +1202,85 @@ def plan_equip(combo, target_id):
             steps.append(("c2v2c", p))
     return steps
 
-def cmd_equip_armor(build, dry_run=False, do_snapshot_slot=None):
+WEAPON_BUCKETS = {1498876634: "Kinetic", 2465295065: "Energy", 953998645: "Power"}
+
+def collect_weapons(prof):
+    """Every weapon instance the account holds, with its slot + location.
+    Same owner convention as collect_armor: owner=None means it's in the vault."""
+    raw = []
+    for it in prof.get("profileInventory", {}).get("data", {}).get("items", []):
+        raw.append((it, None, False))
+    for cid, inv in prof.get("characterInventories", {}).get("data", {}).items():
+        for it in inv.get("items", []):
+            raw.append((it, cid, False))
+    for cid, inv in prof.get("characterEquipment", {}).get("data", {}).items():
+        for it in inv.get("items", []):
+            raw.append((it, cid, True))
+
+    out = []
+    for it, owner, equipped in raw:
+        iid = it.get("itemInstanceId")
+        if not iid:
+            continue
+        # item_meta shares the warm weapon-def cache that `scan` populates, so this
+        # stays offline for anything already scanned.
+        m = item_meta(it["itemHash"])
+        if m.get("itemType") != 3:
+            continue                            # 3 = weapon
+        out.append({"name": m.get("name") or str(it["itemHash"]),
+                    "hash": it["itemHash"], "iid": iid, "owner": owner,
+                    "equipped": equipped,
+                    # character items carry their real slot; vault items report the
+                    # vault bucket, so those are resolved lazily in _weapon_bucket().
+                    "bucket": WEAPON_BUCKETS.get(it.get("bucketHash")),
+                    "type": m.get("type", "")})
+    return out
+
+def _weapon_bucket(p):
+    """Resolve a weapon's equip slot, fetching the def only when the instance is in
+    the vault (where bucketHash reports the vault, not Kinetic/Energy/Power)."""
+    if p.get("bucket"):
+        return p["bucket"]
+    try:
+        d = api_get("/Destiny2/Manifest/DestinyInventoryItemDefinition/%s/" % p["hash"])
+        b = d.get("inventory", {}).get("bucketTypeHash")
+    except SystemExit:
+        b = None
+    p["bucket"] = WEAPON_BUCKETS.get(b, "?")
+    return p["bucket"]
+
+def plan_weapons(names, wpieces, class_type, target_id):
+    """Resolve each requested weapon name to one instance and plan the move+equip.
+    Prefers a copy already on the target character, then the vault, then another
+    character. Reuses plan_equip's action vocabulary."""
+    steps = []
+    for want in names:
+        cands = [p for p in wpieces if want.lower() in p["name"].lower()]
+        if not cands:
+            die("No weapon matching '%s' found in your inventory or vault." % want)
+        # prefer: already equipped here > on this char > vault > elsewhere
+        def rank(p):
+            if p["owner"] == target_id and p["equipped"]:
+                return 0
+            if p["owner"] == target_id:
+                return 1
+            if p["owner"] is None:
+                return 2
+            return 4 if p["equipped"] else 3
+        p = min(cands, key=rank)
+        r = rank(p)
+        act = ("skip", "equip", "v2c", "c2v2c", "blocked")[r]
+        _weapon_bucket(p)
+        steps.append((act, p))
+    buckets = [p["bucket"] for _, p in steps]
+    dupes = set(b for b in buckets if buckets.count(b) > 1)
+    if dupes:
+        die("Two or more requested weapons share the %s slot — pick one per slot."
+            % "/".join(sorted(dupes)))
+    return steps
+
+def cmd_equip_armor(build, dry_run=False, do_snapshot_slot=None, pin_exotic=None,
+                    weapons=None, balance=False):
     if build not in BUILDS:
         die("Unknown build '%s'. Choose: %s" % (build, ", ".join(BUILDS)))
     primary, sec = BUILDS[build]
@@ -1106,21 +1299,35 @@ def cmd_equip_armor(build, dry_run=False, do_snapshot_slot=None):
     if not target_id:
         die("No character found for class %s." % CLASS_TYPES.get(target_cls))
 
-    combo, eslot = pick_build(pieces, target_cls, primary, sec)
+    combo, eslot = pick_build(pieces, target_cls, primary, sec, pin_exotic=pin_exotic,
+                              balance=balance)
     steps = plan_equip(combo, target_id)
+
+    wsteps = []
+    if weapons:
+        wpieces = collect_weapons(prof)
+        wsteps = plan_weapons(weapons, wpieces, target_cls, target_id)
 
     print("=== EQUIP PLAN: %s onto %s (char ...%s) ===" %
           (build, CLASS_TYPES.get(target_cls), target_id[-4:]))
+    if pin_exotic:
+        print("    (exotic pinned to '%s')" % pin_exotic)
     _print_build(combo, eslot, primary, sec)
+    if wsteps:
+        print("\n  Weapons:")
+        for act, p in wsteps:
+            print("    %-9s %-26s %s" % (p["bucket"], p["name"][:26],
+                                         "" if act != "blocked" else "(equipped elsewhere)"))
     print("\nActions:")
     verbs = {"skip": "already equipped, skip", "equip": "equip (already on char)",
              "v2c": "vault -> character, then equip",
              "c2v2c": "other char -> vault -> character, then equip",
              "blocked": "EQUIPPED ON ANOTHER CHARACTER — unequip it in-game first"}
-    for act, p in steps:
-        print("  - %-9s %-26s : %s" % (p["slot"], p["name"][:26], verbs[act]))
-    if any(a == "blocked" for a, _ in steps):
-        print("\n! One or more pieces are equipped on another character. Unequip them "
+    for act, p in steps + wsteps:
+        print("  - %-9s %-26s : %s" % (p.get("slot") or p.get("bucket"),
+                                       p["name"][:26], verbs[act]))
+    if any(a == "blocked" for a, _ in steps + wsteps):
+        print("\n! One or more items are equipped on another character. Unequip them "
               "in-game (equip something else there) and re-run.")
     if do_snapshot_slot is not None:
         los = prof.get("characterLoadouts", {}).get("data", {}).get(target_id, {}).get("loadouts", [])
@@ -1144,7 +1351,7 @@ def cmd_equip_armor(build, dry_run=False, do_snapshot_slot=None):
         return
 
     # 1) get every piece onto the target character
-    for act, p in steps:
+    for act, p in steps + wsteps:
         if act in ("skip", "equip"):
             continue
         if act == "blocked":
@@ -1158,7 +1365,7 @@ def cmd_equip_armor(build, dry_run=False, do_snapshot_slot=None):
             print("  FAIL move-to-char %s: %s %s" % (p["name"], st, msg)); continue
         print("  moved %s -> character" % p["name"])
     # 2) equip everything (skip pieces still not on the character)
-    equip_ids = [p["iid"] for act, p in steps if act != "blocked"]
+    equip_ids = [p["iid"] for act, p in steps + wsteps if act != "blocked"]
     body = {"itemIds": equip_ids, "characterId": target_id, "membershipType": mtype}
     r = api_action("/Destiny2/Actions/Items/EquipItems/", body, token)
     if r.get("ErrorCode") != 1:
@@ -1209,8 +1416,25 @@ def main():
         args = sys.argv[2:]
         dry = "--dry-run" in args
         args = [a for a in args if a != "--dry-run"]
+
+        # --exotic "<name>" pins the exotic armour piece; --weapon "<name>" may be
+        # repeated (max one per Kinetic/Energy/Power slot).
+        balance = "--balance" in args
+        args = [a for a in args if a != "--balance"]
+        pin_exotic, want_weapons, rest = None, [], []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--exotic" and i + 1 < len(args):
+                pin_exotic = args[i + 1]; i += 2; continue
+            if a == "--weapon" and i + 1 < len(args):
+                want_weapons.append(args[i + 1]); i += 2; continue
+            if a == "--loadout" and i + 1 < len(args):
+                i += 2; continue          # handled below off sys.argv
+            rest.append(a); i += 1
+        args = rest
         if not args:
-            die("Usage: %s <build> %s" % (
+            die("Usage: %s <build> %s [--exotic NAME] [--weapon NAME ...]" % (
                 cmd, "<slot 1-10>" if cmd == "apply-loadout" else "[--loadout N] [--dry-run]"))
         build = args[0]
         slot = None
@@ -1224,7 +1448,9 @@ def main():
                 slot = int(sys.argv[i + 1])
         if slot is not None and not (1 <= slot <= 10):
             die("Loadout slot must be 1-10.")
-        cmd_equip_armor(build, dry_run=dry, do_snapshot_slot=slot)
+        cmd_equip_armor(build, dry_run=dry, do_snapshot_slot=slot,
+                        pin_exotic=pin_exotic, weapons=want_weapons or None,
+                        balance=balance)
     else:
         print(__doc__)
 
