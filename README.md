@@ -45,15 +45,43 @@ python3 destiny_vault.py whoami      # confirm account + list characters
 ```
 
 ### 4. Use it
+
+**Read-only — these change nothing:**
 ```bash
-python3 destiny_vault.py loadouts      # list your in-game loadouts per character
-python3 destiny_vault.py scan          # read vault, apply rules.yaml, write vault_report.json
-python3 destiny_vault.py lock-keepers  # lock everything marked KEEP (asks for confirmation)
+python3 destiny_vault.py loadouts       # list your in-game loadouts per character
+python3 destiny_vault.py scan           # read vault, apply rules.yaml, write vault_report.json
+python3 destiny_vault.py armor-scan     # rank your armor into the best set per build
+python3 destiny_vault.py armor-cleanup  # Warlock armor keep/dismantle report
 ```
+
+**Lock-state writes — reversible, and never dismantle anything:**
+```bash
+python3 destiny_vault.py lock-keepers          # lock everything marked KEEP/REVIEW (confirms first)
+python3 destiny_vault.py unlock-all            # unlock every locked weapon (clean slate)
+python3 destiny_vault.py armor-cleanup --lock  # lock survivors AND unlock dismantle candidates
+```
+
+**Live-character writes — transfers and equips gear. Be in orbit:**
+```bash
+python3 destiny_vault.py equip-armor super-grenade --dry-run
+python3 destiny_vault.py apply-loadout class-grenade 3   # equip, then snapshot into loadout slot 3
+```
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Print the transfer/equip plan and change nothing. Always try this first. |
+| `--exotic "<name>"` | Pin a specific exotic instead of letting stat score pick one. Needed when a build *requires* one (e.g. `--exotic "Secant Filaments"`). |
+| `--weapon "<name>"` | Also transfer + equip this weapon. Repeatable, max one per Kinetic/Energy/Power slot. |
+| `--balance` | Search whole armor **sets** to push *both* target stats past 100, instead of picking the top-scoring piece per slot. Armor 3.0 pays nothing for overshooting one stat, so this usually wins. |
+| `--loadout N` | After equipping, snapshot the result into loadout slot N (1–10). |
+
+Builds: `super-class`, `super-grenade`, `super-melee`, `class-grenade`, `grenade-class`.
+(Intellect is now **Super**, Discipline is **Grenade**, Recovery is **Class** — see Armor 3.0 in the reference.)
 
 ### 5. (Optional) Personalize
 ```bash
 cp preferences.example.yaml preferences.yaml   # then edit — it's gitignored
+cp rules.example.yaml rules.yaml               # then edit — also gitignored
 ```
 
 ---
@@ -72,9 +100,18 @@ Fatebringer:
     - [Frenzy, Rampage]              # column 4: AND either of these
 ```
 
-Weapons not listed in `rules.yaml` are left alone (shown under "NOT IN RULES").
-Perk names must match in-game text exactly (case-sensitive). See
-[`DESTINY_REFERENCE.md`](DESTINY_REFERENCE.md) for the current perk pool and god-roll guidance.
+Weapons not listed in `rules.yaml` fall through to the tool's own duplicate/coverage logic
+rather than being judged against a roll.
+
+Perk names must match in-game text **exactly** (case-sensitive) — matching is a plain string
+compare, so `Kill clip` or `Auto Loading Holster` simply never matches. `scan` warns about any
+rule perk it can't find on a single weapon you own, which catches typos and renamed perks.
+
+Matching considers every perk a weapon **can** roll, not just the one currently slotted
+(profile component 310), so a high-Gear-Tier weapon that can swap into a god roll is
+recognised as one. See [`DESTINY_REFERENCE.md`](DESTINY_REFERENCE.md) for the current perk
+pool and god-roll guidance, and [`CLEANUP_PLAN.md`](CLEANUP_PLAN.md) for how KEEP/DISMANTLE/REVIEW
+is actually decided.
 
 ---
 
@@ -83,15 +120,17 @@ Perk names must match in-game text exactly (case-sensitive). See
 | File / dir | Committed? | What it is |
 |---|---|---|
 | `destiny_vault.py` | ✅ | The tool. |
-| `rules.yaml` | ✅ | Your keep/dismantle rules (starts with examples). |
-| `DESTINY_REFERENCE.md` | ✅ | Current-sandbox reference: perks, Armor 3.0, tiers, god rolls (as of 2026-07). |
-| `research/` | ✅ | Full research with source citations behind the reference doc. |
+| `rules.example.yaml` | ✅ | Template for your god-roll rules. Copy to `rules.yaml`. |
 | `preferences.example.yaml` | ✅ | Template for your personal preferences. |
+| `DESTINY_REFERENCE.md` | ✅ | Current-sandbox reference: perks, Armor 3.0, tiers, god rolls. |
+| `CLEANUP_PLAN.md` | ✅ | The keep/dismantle methodology the classifier implements. |
+| `research/` | ✅ | Full research with source citations behind the reference doc. |
+| `rules.yaml` | ❌ gitignored | **Your** keep/dismantle rules — personal, not shipped. |
 | `preferences.yaml` | ❌ gitignored | Your personal copy (account name, builds). |
 | `.destiny_config.json` | ❌ gitignored | **Secret** — API key + client secret. |
 | `.destiny_token.json` | ❌ gitignored | **Secret** — OAuth token. |
-| `.manifest_cache.json` | ❌ gitignored | Generated hash→name cache (rebuilt on demand). |
-| `vault_report.json` | ❌ gitignored | Scan output (reveals your inventory). |
+| `.manifest_cache.json`, `.weapon_defs_cache.json`, `.armor_defs_cache.json` | ❌ gitignored | Generated hash→name caches (rebuilt on demand). |
+| `*_report.json`, `scratch/` | ❌ gitignored | All scan output — **reveals your inventory**. Ignored by pattern so ad-hoc dumps can't leak. |
 
 ---
 

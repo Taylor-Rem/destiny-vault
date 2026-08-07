@@ -6,10 +6,14 @@
 preferences.yaml
 
 # ==== Personal output — reveals your inventory ====
+# Matched by PATTERN, not by name: ad-hoc dumps (armor_out.txt, heavies.json, vw.txt…)
+# kept slipping past an exact-name list and into a PUBLIC repo. Put throwaway output
+# in scratch/ and it can never be committed by accident.
 vault_report.json
 VAULT_REPORT.md
-armor_report.json
-armor_cleanup_report.json
+*_report.json
+*_cleanup_report.json
+scratch/
 
 # ==== Generated / cached ====
 # .manifest_cache.json / .weapon_defs_cache.json / .armor_defs_cache.json are

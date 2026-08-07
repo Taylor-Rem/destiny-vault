@@ -320,10 +320,16 @@ combinations → god-roll rules → keep/junk. In `rules.yaml`, each weapon's `r
 Col-3 / Col-4 columns; list acceptable perks per column as alternatives (see §7 patterns). Because the tool
 matches by **exact in-game perk/stat name**, use the names in §2/§3/§8/§9 verbatim.
 
-> **Armor caveat:** the current `rules.yaml`/`classify()` logic matches *perk names* — great for weapons, but
-> armor keep-value is driven by **archetype + tier + total stats**, which are not socket "perks" in the same
-> way. To rank armor, the tool would need to read the instance stats (component 300) + item tier + archetype,
-> not just socket plug names. Flag for a future enhancement if we want armor rules.
+> **Armor caveat:** `rules.yaml`/`classify()` matches *perk names* — great for weapons, but armor
+> keep-value is driven by **archetype + tier + total stats**, which are not socket "perks" in the same
+> way. So armor does **not** go through `rules.yaml` at all.
+>
+> **This is implemented** (`armor-scan` / `armor-cleanup`, via `classify_armor()`), not a future
+> enhancement — an earlier draft of this section said otherwise. It reads per-stat values from profile
+> component **304** (item stats) and the armor Gear Tier from component **300** (instances).
+> ⚠️ Note the correction: an earlier draft said stats came from component 300. They do not — 300 carries
+> the instance (including `gearTier`), and **304** carries the stat block. The archetype is derived as the
+> piece's two highest stats (`top2`), not read from a field.
 
 ## 18. Common mass-dismantle mistakes
 1. Trashing non-reacquirable random rolls thinking they're in Collections.
