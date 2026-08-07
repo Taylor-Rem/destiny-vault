@@ -31,13 +31,17 @@ USAGE
                           specific exotic, e.g. --exotic "Secant Filaments")
       --weapon "<name>"   also transfer + equip this weapon; repeatable, max one
                           per Kinetic/Energy/Power slot
+      --balance           search whole armour SETS to drive BOTH stats past 100
+                          rather than picking the highest-scoring piece per slot.
+                          Armor 3.0 pays no bonus for overshooting one stat, so a
+                          balanced set usually beats a lopsided one.
 
     builds: super-class | super-grenade | super-melee | class-grenade | grenade-class
             ("Intellect" is now Super)
     equip-armor / apply-loadout write to your LIVE character (be in orbit). Add
     --dry-run to preview the transfer/equip plan without changing anything.
 
-Requires: Python 3.8+, and PyYAML  (pip3 install pyyaml)
+Requires: Python 3.8+, and PyYAML  (pip install pyyaml)
 """
 
 import base64
@@ -81,8 +85,19 @@ def die(msg):
     print("ERROR: " + msg)
     sys.exit(1)
 
+_cfg = None
+def get_config():
+    """Cached config. A scan makes thousands of API calls, and re-reading +
+    re-parsing the config file on every one of them was pure overhead."""
+    global _cfg
+    if _cfg is None:
+        _cfg = load_json(CONFIG_PATH)
+        if not _cfg or not _cfg.get("api_key"):
+            die("No API key configured. Run: python destiny_vault.py setup")
+    return _cfg
+
 def api_get(path, token=None):
-    cfg = load_json(CONFIG_PATH) or {}
+    cfg = get_config()
     req = urllib.request.Request(API_ROOT + path)
     req.add_header("X-API-Key", cfg["api_key"])
     if token:
@@ -94,7 +109,7 @@ def api_get(path, token=None):
     return data["Response"]
 
 def api_post(path, body, token):
-    cfg = load_json(CONFIG_PATH) or {}
+    cfg = get_config()
     raw = json.dumps(body).encode()
     req = urllib.request.Request(API_ROOT + path, data=raw, method="POST")
     req.add_header("X-API-Key", cfg["api_key"])
@@ -111,7 +126,7 @@ def api_action(path, body, token):
     """POST like api_post but NON-fatal: returns the full response dict (incl.
     ErrorCode/ErrorStatus/Message) instead of dying, so callers can handle
     per-item failures (in-activity, wrong location, etc.) themselves."""
-    cfg = load_json(CONFIG_PATH) or {}
+    cfg = get_config()
     raw = json.dumps(body).encode()
     req = urllib.request.Request(API_ROOT + path, data=raw, method="POST")
     req.add_header("X-API-Key", cfg["api_key"])
@@ -149,7 +164,7 @@ def cmd_setup():
 def _token_request(body):
     """POST to the OAuth token endpoint (authorization_code or refresh_token grant),
     stamp + persist the resulting token, and return it. Shared by login and refresh."""
-    cfg = load_json(CONFIG_PATH)
+    cfg = get_config()
     body = dict(body, client_id=cfg["client_id"])
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     if cfg.get("client_secret"):
@@ -329,7 +344,9 @@ def def_name(entity_type, hash_):
         name = (d.get("displayProperties", {}).get("name")
                 or d.get("name")
                 or str(hash_))
-    except SystemExit:
+    except (SystemExit, urllib.error.HTTPError, urllib.error.URLError):
+        # Invalid/empty plug hashes are common (see CLAUDE.md); Bungie answers some
+        # with ErrorCode!=1 (-> die -> SystemExit) and some with a plain HTTP 404.
         name = str(hash_)
     cache[key] = name
     _mark_dirty(MANIFEST_CACHE, cache)
@@ -360,7 +377,7 @@ def item_meta(hash_):
         return _wdefs[k]
     try:
         d = api_get("/Destiny2/Manifest/DestinyInventoryItemDefinition/%s/" % hash_)
-    except SystemExit:
+    except (SystemExit, urllib.error.HTTPError, urllib.error.URLError):
         d = {}
     _wdefs[k] = {
         "name": d.get("displayProperties", {}).get("name", str(hash_)),
@@ -411,11 +428,26 @@ def load_rules():
     try:
         import yaml
     except ImportError:
-        die("PyYAML not installed. Run: pip3 install pyyaml")
+        die("PyYAML not installed. Run: pip install pyyaml")
     if not os.path.exists(RULES_PATH):
         die("No rules.yaml found next to this script.")
-    with open(RULES_PATH) as f:
+    with open(RULES_PATH, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+def rule_perks(rules):
+    """Every perk name referenced by any rule's `require` groups.
+
+    A weapon's perk pool is filtered down to known perk names before matching, so
+    a rule naming a perk OUTSIDE that set could never be satisfied — the rule just
+    silently under-fired. (Col-3 perks like Explosive Payload / Auto-Loading
+    Holster and older Col-4 perks like Kill Clip / Rampage are legitimate rule
+    targets but aren't in TRAIT_PERKS, which is scoped to the dup/coverage
+    policy.) These names are folded into the MATCHING set so rules behave as
+    documented; they are deliberately NOT added to TRAIT_PERKS, which must stay
+    policy-scoped because it drives sole-source coverage and duplicate collapse.
+    """
+    return {p for r in (rules or {}).values()
+            for group in (r or {}).get("require", []) for p in group}
 
 def fetch_profile(token):
     mtype, mid, name = get_membership(token)
@@ -474,8 +506,13 @@ def classify(item_name, perk_names, rule):
         return False, "missing: " + "; ".join(missing)
     return True, "matches god roll"
 
-def _collect_weapons(prof, sockets_data, reuse_data, protected):
-    """Return a list of weapon dicts (weapons only) with metadata + perks."""
+def _collect_weapons(prof, sockets_data, reuse_data, protected, extra_perks=frozenset()):
+    """Return a list of weapon dicts (weapons only) with metadata + perks.
+
+    extra_perks: perk names referenced by rules.yaml that aren't in TRAIT_PERKS.
+    They widen `rule_pool` (what god-roll matching sees) WITHOUT widening `pool`
+    (what coverage/duplicate-collapse sees), so fixing rule matching can't quietly
+    change which weapons count as sole-source or as covered duplicates."""
     raw = []
     for it in prof.get("profileInventory", {}).get("data", {}).get("items", []):
         it["_loc"] = "Vault"; raw.append(it)
@@ -504,6 +541,8 @@ def _collect_weapons(prof, sockets_data, reuse_data, protected):
             "perks": perks, "sig": frozenset(perks),
             "traits": set(perks) & TRAIT_PERKS,   # currently-slotted behavioural perks
             "pool": set(pool) & TRAIT_PERKS,       # everything it CAN roll (drives decisions)
+            # same pool, plus any rules.yaml-only perk names — god-roll matching only
+            "rule_pool": set(pool) & (TRAIT_PERKS | extra_perks),
             "prot": iid in protected,
             "crafted": bool(it.get("state", 0) & 8),  # state flag 8 = Crafted -> never dismantle
             "reason": None,
@@ -531,8 +570,22 @@ def cmd_scan(do_lock=False):
                 if iid != "0":
                     protected.add(iid)
 
-    weapons = _collect_weapons(prof, sockets_data, reuse_data, protected)
+    extra = rule_perks(rules) - TRAIT_PERKS
+    weapons = _collect_weapons(prof, sockets_data, reuse_data, protected, extra)
     _flush_caches()
+
+    # A rule perk that matches nothing anywhere in the vault is usually a typo or
+    # a stale in-game name — matching is exact and case-sensitive, so it would
+    # otherwise fail silently and quietly weaken that weapon's rule.
+    seen_perks = set()
+    for w in weapons:
+        seen_perks |= set(w["perks"])
+    unseen = sorted(p for p in rule_perks(rules) if p not in seen_perks)
+    if unseen:
+        print("\n! rules.yaml names %d perk(s) not found on ANY weapon you own — check "
+              "spelling/capitalisation against the in-game text:" % len(unseen))
+        for p in unseen:
+            print("    %s" % p)
 
     # Pass 2 input: which trait perks are on exactly ONE weapon (vault-relative).
     # Uses the CAN-roll pool, not just slotted perks — a weapon that can swap to a
@@ -547,7 +600,7 @@ def cmd_scan(do_lock=False):
     # roll), so a swappable god-roll is recognised even when a filler perk is slotted.
     for w in weapons:
         w["godroll"] = bool(w["name"] in rules
-                            and classify(w["name"], sorted(w["pool"]), rules[w["name"]])[0])
+                            and classify(w["name"], sorted(w["rule_pool"]), rules[w["name"]])[0])
         w["sole"] = sorted(p for p in w["pool"] if len(sources[p]) == 1)
         if w["prot"]:
             w["reason"] = "in loadout / equipped"
@@ -792,7 +845,7 @@ def armor_meta(hash_):
         return _adefs[k]
     try:
         d = api_get("/Destiny2/Manifest/DestinyInventoryItemDefinition/%s/" % hash_)
-    except SystemExit:
+    except (SystemExit, urllib.error.HTTPError, urllib.error.URLError):
         d = {}
     _adefs[k] = {
         "name": d.get("displayProperties", {}).get("name", str(hash_)),
@@ -1244,12 +1297,12 @@ def _weapon_bucket(p):
     try:
         d = api_get("/Destiny2/Manifest/DestinyInventoryItemDefinition/%s/" % p["hash"])
         b = d.get("inventory", {}).get("bucketTypeHash")
-    except SystemExit:
+    except (SystemExit, urllib.error.HTTPError, urllib.error.URLError):
         b = None
     p["bucket"] = WEAPON_BUCKETS.get(b, "?")
     return p["bucket"]
 
-def plan_weapons(names, wpieces, class_type, target_id):
+def plan_weapons(names, wpieces, target_id):
     """Resolve each requested weapon name to one instance and plan the move+equip.
     Prefers a copy already on the target character, then the vault, then another
     character. Reuses plan_equip's action vocabulary."""
@@ -1306,7 +1359,7 @@ def cmd_equip_armor(build, dry_run=False, do_snapshot_slot=None, pin_exotic=None
     wsteps = []
     if weapons:
         wpieces = collect_weapons(prof)
-        wsteps = plan_weapons(weapons, wpieces, target_cls, target_id)
+        wsteps = plan_weapons(weapons, wpieces, target_id)
 
     print("=== EQUIP PLAN: %s onto %s (char ...%s) ===" %
           (build, CLASS_TYPES.get(target_cls), target_id[-4:]))
