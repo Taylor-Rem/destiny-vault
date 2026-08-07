@@ -49,7 +49,7 @@
 Generalist Void/orb/survivability artifact. Best fit for Prismatic weapon+ability builds.
 
 **Tier 1**
-- **Elemental Siphon** — Rapidly defeating combatants with a weapon matching your Super's element spawns an elemental pickup of that element.
+- **Elemental Siphon** — "Rapid final blows with a **Kinetic weapon** or a weapon matching your equipped Super create an Elemental pickup that matches your equipped Super." *(⚠️ Corrected 2026-08-02 from the live API sandbox-perk text: earlier drafts listed only the matching-element trigger and **omitted Kinetic entirely**. Kinetic weapons proc this on any subclass — e.g. Witherhoard on the Raid loadout. Note it makes an **Elemental pickup, not an Orb of Power**, so it does not feed Super energy.)*
 - **Energy Diffusion Substrate** — Gain a small amount of **damage resistance** against all combatant damage (unconditional).
 - **Creeping Chill** — Stasis-weapon final blows on slowed/frozen targets release a Slowing burst.
 - **Press the Advantage** — Breaking a combatant's shield grants a burst of stability, handling, and reload speed (PvE).
@@ -69,9 +69,9 @@ Generalist Void/orb/survivability artifact. Best fit for Prismatic weapon+abilit
 **Tier 3**
 - **Prismatic Transfer** — Casting your Super grants allies with a non-matching Super element a weapon damage bonus (~+20%).
 - **Argent Blade** — With Armor Charge, Sword damage consumes a charge to grant Argent Blade (stacking Sword damage).
-- **Expanding Abyss** — Your Void **weapons** deal increased damage to weakened targets (raises weaken 30%→35%; weapons only, NOT Supers/abilities).
+- **Expanding Abyss** — "**Void sources** deal increased damage to weakened targets." *(⚠️ Corrected 2026-08-02 from the live API sandbox-perk text, after the owner flagged the error. An earlier draft restricted this to **Void weapons only, NOT Supers/abilities** — that is wrong. The API says "Void **sources**", which includes Void **Supers and abilities**: Nova Bomb into a weakened target does benefit. Owner confirmed in-game.)*
 - **Shieldcrush** — Defensive keywords (overshield/Frost Armor/Woven Mail) empower your melee; offensive keywords empower grenades.
-- **Transference** — Bonus grenade/melee damage while Transcendent; afterward, weapon final blows refund up to 50% Super energy.
+- **Transference** — "Gain increased grenade and melee damage while transcendent. Weapon final blows **while transcendent** refund **Light and Dark energy** after Transcendence ends." *(⚠️ Corrected 2026-08-02 from the live API sandbox-perk text, after the owner flagged the error. An earlier draft claimed this refunded **Super energy** — it does NOT. It refunds **Transcendence** (Light/Dark) energy, i.e. it accelerates your next Transcendence, not your Super. Note also the timing: the final blows must land **while transcendent**; only the payout is deferred until Transcendence ends. This perk is **not** a Super-generation tool.)*
 - **Sniper's Meditation** — Sniper Rifle hits grant a stacking Sniper Rifle damage bonus.
 - **Shock and Awe** — While Amplified, Arc final blows trigger a Jolting Arc explosion.
 
@@ -111,11 +111,11 @@ non-Stasis builds.**
 
 **Tier 1**
 - **Hold the Line** — While surrounded, Machine Guns and Glaives gain reload speed and stability; final blows heal you.
-- **Dielectric** — Defeating Arc-debuffed targets grants Bolt Charge; rapidly defeating them spawns an Orb of Power.
+- **Dielectric** — Defeating Arc-debuffed targets grants Bolt Charge. Rapidly defeating Arc-debuffed targets spawns an Orb of Power **and heals a small portion of health**. *(Verbatim from the API 2026-07-25 — the heal was missing from earlier drafts; it makes this a survivability perk, not just economy.)*
 - **Volatile Marksman** — Rapid Void-weapon precision hits/final blows grant Volatile Rounds.
 - **Unraveling Orbs** — Picking up an Orb of Power or a Tangle grants your Strand weapons Unraveling Rounds.
 - **Photonic Flare** — Defeating an Exhausted or Severed target with Arc damage releases a Blinding burst.
-- **Elemental Siphon** — Rapidly defeating combatants with a weapon matching your Super's element spawns an elemental pickup.
+- **Elemental Siphon** — Rapid final blows with a **Kinetic weapon** or a weapon matching your equipped Super create an Elemental pickup matching your Super. *(Same perk as on Hunter's Journal — see §3 for the corrected text; the Kinetic trigger was missing from earlier drafts.)*
 - **Perpetual Destruction** — Rapid final blows with non-exotic Rocket Launchers refund ammo and increase reload speed for a short duration.
 
 **Tier 2**
@@ -128,12 +128,12 @@ non-Stasis builds.**
 - **Gold from Lead** — Picking up Special ammo has a chance to grant Heavy ammo.
 
 **Tier 3**
-- **Particle Reconstruction** — Sustained Fusion/Linear Fusion damage debuffs the target (it takes increased damage) and partially reloads from reserves.
+- **Particle Reconstruction** — Sustained Fusion/Linear Fusion damage partially refills the magazine from reserves **and grants that weapon bonus damage against that target**. *(Verbatim from the API 2026-07-25. Note: it buffs **your weapon**, it does not debuff the target — so it does nothing for teammates.)*
 - **Elemental Supercharger** — Killing Exhausted/Severed targets with a weapon matching your Super element restores extra Super energy.
 - **Heavy Ordnance Regeneration** — Sustained Machine Gun/Rocket damage grants damage resist and boosts grenade/melee regen.
 - **Defibrillating Blast** — Stunning a Champion grants max Bolt Charge, triggering an Arc bolt that heals you and Jolts enemies.
 - **Void Flux** — Defeating weakened targets with a Void weapon spreads Volatile to nearby targets.
-- **Limit Break** — Increased Super damage while critically wounded.
+- **Limit Break** — Casting a Super while you are critically wounded **OR while you have an elemental buff matching your Super's element** grants a period of increased Super damage. *(Verbatim from the API 2026-07-25. ⚠️ The second trigger was missing from earlier drafts and completely changes the perk: it is **not** a be-nearly-dead gamble. Radiant/Amplified/Overshield/Frost Armor/Woven Mail matching your Super element all turn it on safely — and **Facet of Purpose** grants exactly such a buff on Orb pickup, keyed to your Super's element.)*
 - **To Shreds** — Sustained damage to Severed targets Unravels them; defeating a Severed target creates a Strand-energy hotspot that grants Woven Mail to nearby allies.
 
 ## 6. NPA Repulsor Regulator (Deep) — Arc/Void/Strand
