@@ -18,11 +18,17 @@ Read this before doing vault work.
 - **Read `DESTINY_REFERENCE.md` before any keep/dismantle reasoning.** The Destiny sandbox changed
   a lot (Armor 3.0, weapon Gear Tiers) and model training is likely stale. `research/` holds the
   cited sources behind it.
+- **`research/god-rolls.md` is the official per-weapon god-roll reference** (researched 2026-08-07,
+  confidence-rated). `rules.yaml` is generated from its verdicts — update the doc first, then
+  mirror into rules. Never dismantle on a LOW-confidence entry alone.
 
 ## Commands
 Setup path: `setup` (creds) → `login` (OAuth) → `whoami`.
 Read-only: `loadouts`, `scan`, `armor-scan [build]`, `armor-cleanup`.
 Writes: `lock-keepers`, `unlock-all`, `armor-cleanup --lock` (lock state only);
+`sync_locks.py` (repo root) diff-syncs lock state to the latest reports and is the
+preferred path after re-classifying — flips only mismatches instead of the full
+unlock-all → relock cycle (`--dry-run` previews);
 `equip-armor <build>` and `apply-loadout <build> <slot>` write to the **live character**
 (must be in orbit) — both take `--dry-run`, `--exotic`, `--weapon`, `--balance`.
 Requires the user to have already run `setup`/`login` (needs their Bungie app + token).
@@ -53,6 +59,17 @@ Two perk sets, and they are **not** interchangeable:
   subclass item's `plugItemHashes`. Some plug hashes are empty/invalid and error — guard the lookup.
 - **`.manifest_cache.json`** caches hash→name. If you change lookup logic, purge stale entries
   (e.g. ones cached as the raw hash) or they'll persist.
+- **The "phantom re-lock" root cause (proven 2026-08-08): Bungie-net/api#764**, an open-since-2018
+  Bungie bug — a vault→character transfer can deliver the item LOCKED, inheriting the lock from
+  another instance of the same itemHash (i.e. our locked keepers). Evidence: every wrongly-locked
+  staged dismantle item had a locked same-hash sibling; zero locks appeared without one; vault
+  items never affected. feed_dismantle works around it (drops keeper-sibling locks around each
+  transfer, restores them in a `finally`, unlocks each arrival immediately). The in-game client
+  renders the arrival's lock state once and won't refresh on API unlocks — a relog clears it.
+- **SnapshotLoadout LOCKS every item it captures** (Destiny auto-locks in-game-loadout members) —
+  a second, real lock path, though not the phantom one above. `plan_weapons` is report-aware:
+  verdict (KEEP > REVIEW > unclassified > DISMANTLE) outranks location, ties break toward most
+  matched god-roll perks. Don't "simplify" the rank back to location-only.
 
 ## Safety
 Dismantles are irreversible; only exotics/curated rolls re-pull from Collections. The tool only

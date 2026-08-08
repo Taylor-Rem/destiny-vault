@@ -1304,8 +1304,20 @@ def _weapon_bucket(p):
 
 def plan_weapons(names, wpieces, target_id):
     """Resolve each requested weapon name to one instance and plan the move+equip.
-    Prefers a copy already on the target character, then the vault, then another
-    character. Reuses plan_equip's action vocabulary."""
+    Report verdict wins first (KEEP > REVIEW > unclassified > DISMANTLE), then
+    location: on the target character, then vault, then another character.
+    Reuses plan_equip's action vocabulary.
+
+    The verdict must come first: snapshotting a loadout LOCKS its items in-game,
+    so handing a DISMANTLE-condemned copy to a loadout both protects trash and
+    re-locks an item sync_locks just unlocked. Location-only ranking used to pick
+    exactly those copies (feed_dismantle stages them on the character)."""
+    verdict = {}
+    rep = load_json("vault_report.json") or {}
+    for bucket, v in (("keep", 0), ("review", 1), ("dismantle", 3)):
+        for w in rep.get(bucket, []):
+            # ties within a bucket break toward the most matched god-roll perks
+            verdict[w["id"]] = (v, -len(w.get("perks") or ()))
     steps = []
     for want in names:
         cands = [p for p in wpieces if want.lower() in p["name"].lower()]
@@ -1314,14 +1326,23 @@ def plan_weapons(names, wpieces, target_id):
         # prefer: already equipped here > on this char > vault > elsewhere
         def rank(p):
             if p["owner"] == target_id and p["equipped"]:
-                return 0
-            if p["owner"] == target_id:
-                return 1
-            if p["owner"] is None:
-                return 2
-            return 4 if p["equipped"] else 3
+                loc = 0
+            elif p["owner"] == target_id:
+                loc = 1
+            elif p["owner"] is None:
+                loc = 2
+            else:
+                loc = 4 if p["equipped"] else 3
+            v, nperks = verdict.get(p["iid"], (2, 0))
+            return (v, nperks, loc)
         p = min(cands, key=rank)
-        r = rank(p)
+        v, _np, r = rank(p)
+        if v == 3:
+            print("! every '%s' you own is a DISMANTLE candidate — using one anyway;"
+                  " the loadout snapshot will LOCK it, so re-run scan + sync_locks"
+                  " if you keep it." % want)
+        elif v == 1:
+            print("  (best '%s' on the account is a REVIEW roll — no KEEP copy)" % want)
         act = ("skip", "equip", "v2c", "c2v2c", "blocked")[r]
         _weapon_bucket(p)
         steps.append((act, p))

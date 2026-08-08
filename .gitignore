@@ -16,6 +16,9 @@ VAULT_REPORT.md
 scratch/
 
 # ==== Generated / cached ====
+# screen-calibration for auto_dismantle.py — machine/resolution specific,
+# recreate with: auto_dismantle.py --calibrate
+dismantle_positions.json
 # .manifest_cache.json / .weapon_defs_cache.json / .armor_defs_cache.json are
 # rebuilt on demand from the Bungie manifest
 .manifest_cache.json
