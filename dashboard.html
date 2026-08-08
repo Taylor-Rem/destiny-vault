@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>destiny_vault dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --card: #1c2330; --border: #2d3646;
+    --text: #dbe2ec; --dim: #8b98a9; --accent: #6ea8fe; --gold: #d4b45f;
+    --green: #3fb950; --red: #f85149; --amber: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: 10px 18px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 12px; flex: none;
+  }
+  header h1 { margin: 0; font-size: 17px; letter-spacing: .04em; color: var(--gold); }
+  header span { color: var(--dim); font-size: 12px; }
+  main { display: flex; flex: 1; min-height: 0; }
+
+  /* left: tools */
+  #tools { flex: 1.15; overflow-y: auto; padding: 14px 16px 40px; }
+  .group { margin-bottom: 22px; }
+  .group h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--gold); margin: 0 0 2px;
+  }
+  .group .note { color: var(--dim); font-size: 12px; margin: 0 0 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px;
+  }
+  .card .row1 { display: flex; align-items: center; gap: 8px; }
+  .card .name { font-weight: 600; }
+  .card .desc { color: var(--dim); font-size: 12px; margin: 4px 0 6px; }
+  .card.running { border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset; }
+  .opts { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 6px; }
+  .opts label { font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 5px; }
+  .opts input[type=text], .opts input[type=number], .opts select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px; font-size: 12px; max-width: 150px;
+  }
+  .opts input[type=number] { width: 70px; }
+  button {
+    background: #23304a; color: var(--accent); border: 1px solid #33507e;
+    border-radius: 6px; padding: 4px 14px; font-size: 13px; cursor: pointer;
+  }
+  button:hover { background: #2a3a58; }
+  button.stop { color: var(--red); border-color: #6e2c2c; background: #3a2222; }
+  button.stop:hover { background: #482828; }
+  button:disabled { opacity: .45; cursor: default; }
+  .runstate { margin-left: auto; font-size: 11px; color: var(--green); }
+
+  /* right: jobs + console */
+  #side {
+    flex: 1; min-width: 420px; max-width: 46%; display: flex; flex-direction: column;
+    border-left: 1px solid var(--border); background: var(--panel);
+  }
+  #jobs { flex: none; max-height: 26%; overflow-y: auto; border-bottom: 1px solid var(--border); }
+  #jobs .job {
+    padding: 5px 12px; cursor: pointer; display: flex; gap: 8px; align-items: center;
+    font-size: 12.5px; border-bottom: 1px solid #10151d;
+  }
+  #jobs .job:hover { background: #1b2330; }
+  #jobs .job.sel { background: #22304a; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot.running { background: var(--green); animation: pulse 1.2s infinite; }
+  .dot.stopping { background: var(--amber); }
+  .dot.done { background: #4d5a6d; }
+  .dot.failed { background: var(--red); }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .job .t { color: var(--dim); margin-left: auto; font-size: 11px; }
+  #console {
+    flex: 1; overflow-y: auto; padding: 10px 14px; margin: 0;
+    font: 12px/1.5 Consolas, monospace; white-space: pre-wrap; word-break: break-word;
+  }
+  #console .stdin-echo { color: var(--accent); }
+  #stdinrow { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); }
+  #stdinrow input {
+    flex: 1; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px; padding: 5px 9px;
+    font: 12.5px Consolas, monospace;
+  }
+  #empty { color: var(--dim); padding: 30px; text-align: center; }
+  #toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: #3a2222; border: 1px solid var(--red); color: #ffb4ae;
+    padding: 8px 16px; border-radius: 7px; display: none; max-width: 70%;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>DESTINY VAULT</h1>
+  <span id="pyinfo"></span>
+</header>
+<main>
+  <div id="tools"></div>
+  <div id="side">
+    <div id="jobs"><div id="empty">No jobs yet — press a button.</div></div>
+    <pre id="console"></pre>
+    <div id="stdinrow" style="display:none">
+      <input id="stdin" placeholder="send a line to the running command (Enter)">
+      <button onclick="sendStdin()">send</button>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+let TOOLS = {};                 // id -> tool spec
+let jobs = [];                  // latest /api/jobs
+let selected = null;            // selected job id
+let outFrom = 0;                // next line index for selected job
+const $ = id => document.getElementById(id);
+
+// auto-dismantle modes that never destroy anything → skip the scary confirm
+const SAFE_MODES = new Set(["--calibrate", "--audio-test", "--test-hold", "--list-devices"]);
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg; t.style.display = "block";
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 5000);
+}
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+function optInput(tool, o) {
+  const id = `opt-${tool.id}-${o.key}`;
+  if (o.type === "bool")
+    return `<label><input type="checkbox" id="${id}" ${o.default ? "checked" : ""}>${o.label}</label>`;
+  if (o.type === "select") {
+    const opts = o.choices.map(c => {
+      const lbl = (o.labels && o.labels[c] !== undefined) ? o.labels[c] : (c === "" ? "(all)" : c);
+      const sel = String(c) === String(o.default) ? "selected" : "";
+      return `<option value="${c}" ${sel}>${lbl}</option>`;
+    }).join("");
+    return `<label>${o.label}<select id="${id}">${opts}</select></label>`;
+  }
+  if (o.type === "num")
+    return `<label>${o.label}<input type="number" id="${id}" value="${o.default}" step="any"
+            ${o.min !== undefined ? `min="${o.min}"` : ""} ${o.max !== undefined ? `max="${o.max}"` : ""}></label>`;
+  return `<label>${o.label}<input type="text" id="${id}" value="${o.default || ""}"></label>`;
+}
+
+function renderTools(groups) {
+  $("tools").innerHTML = groups.map(g => `
+    <div class="group">
+      <h2>${g.title}</h2>
+      <p class="note">${g.note || ""}</p>
+      <div class="cards">
+        ${g.tools.map(t => `
+          <div class="card" id="card-${t.id}">
+            <div class="desc"><span class="name" style="color:var(--text)">${t.name}</span> — ${t.desc}</div>
+            <div class="opts">${(t.opts || []).map(o => optInput(t, o)).join("")}</div>
+            <div class="row1">
+              <button id="btn-${t.id}" onclick="runTool('${t.id}')">Run</button>
+              <button id="stopbtn-${t.id}" class="stop" style="display:none" onclick="stopTool('${t.id}')">Stop</button>
+              <span class="runstate" id="state-${t.id}"></span>
+            </div>
+          </div>`).join("")}
+      </div>
+    </div>`).join("");
+}
+
+function collectOpts(tool) {
+  const opts = {};
+  for (const o of tool.opts || []) {
+    const el = $(`opt-${tool.id}-${o.key}`);
+    opts[o.key] = o.type === "bool" ? el.checked : el.value;
+  }
+  return opts;
+}
+
+function needsConfirm(tool, opts) {
+  if (!tool.confirm) return false;
+  if (opts.dry_run === true) return false;
+  if (tool.id === "auto-dismantle" && SAFE_MODES.has(opts.mode)) return false;
+  return true;
+}
+
+async function runTool(id) {
+  const tool = TOOLS[id];
+  const opts = collectOpts(tool);
+  if (needsConfirm(tool, opts) && !confirm(tool.confirm)) return;
+  try {
+    const r = await api("/api/run", {tool: id, opts});
+    selectJob(r.id);
+    await refreshJobs();
+  } catch (e) { toast(e.message); }
+}
+
+async function stopTool(id) {
+  const j = jobs.find(j => j.tool === id && (j.status === "running" || j.status === "stopping"));
+  if (j) { try { await api("/api/stop", {id: j.id}); } catch (e) { toast(e.message); } }
+}
+
+function selectJob(id) {
+  if (selected !== id) { selected = id; outFrom = 0; $("console").textContent = ""; }
+  renderJobs();
+}
+
+function renderJobs() {
+  const box = $("jobs");
+  if (!jobs.length) { box.innerHTML = '<div id="empty">No jobs yet — press a button.</div>'; return; }
+  box.innerHTML = jobs.map(j => `
+    <div class="job ${j.id === selected ? "sel" : ""}" onclick="selectJob(${j.id})">
+      <span class="dot ${j.status}"></span>
+      <span>#${j.id} ${j.name}</span>
+      <span class="t">${j.status}${j.rc !== null && j.status !== "running" ? " (rc " + j.rc + ")" : ""}
+        · ${new Date(j.started * 1000).toLocaleTimeString()}</span>
+    </div>`).join("");
+
+  const running = new Map();   // tool id -> job
+  for (const j of jobs)
+    if (j.status === "running" || j.status === "stopping") running.set(j.tool, j);
+  for (const id in TOOLS) {
+    const card = $(`card-${id}`); if (!card) continue;
+    const j = running.get(id);
+    card.classList.toggle("running", !!j);
+    $(`btn-${id}`).disabled = !!j;
+    $(`stopbtn-${id}`).style.display = j ? "" : "none";
+    $(`state-${id}`).textContent = j ? j.status + "…" : "";
+  }
+  const sel = jobs.find(j => j.id === selected);
+  $("stdinrow").style.display = sel && sel.status === "running" ? "" : "none";
+}
+
+async function refreshJobs() {
+  try { jobs = (await api("/api/jobs")).jobs; renderJobs(); } catch (e) {}
+}
+
+async function pollOutput() {
+  if (selected === null) return;
+  try {
+    const r = await api(`/api/output?id=${selected}&from=${outFrom}`);
+    if (r.lines.length) {
+      const c = $("console");
+      const stick = c.scrollHeight - c.scrollTop - c.clientHeight < 40;
+      c.textContent += r.lines.join("\n") + "\n";
+      outFrom = r.next;
+      if (stick) c.scrollTop = c.scrollHeight;
+    }
+  } catch (e) {}
+}
+
+async function sendStdin() {
+  const inp = $("stdin");
+  if (selected === null || !inp.value.length) return;
+  try { await api("/api/stdin", {id: selected, text: inp.value}); inp.value = ""; }
+  catch (e) { toast(e.message); }
+}
+$("stdin") && $("stdin").addEventListener("keydown", e => { if (e.key === "Enter") sendStdin(); });
+
+(async function init() {
+  const r = await api("/api/tools");
+  for (const g of r.groups) for (const t of g.tools) TOOLS[t.id] = t;
+  $("pyinfo").textContent = r.python;
+  renderTools(r.groups);
+  refreshJobs();
+  setInterval(refreshJobs, 1200);
+  setInterval(pollOutput, 700);
+})();
+</script>
+</body>
+</html>

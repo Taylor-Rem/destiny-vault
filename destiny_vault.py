@@ -388,6 +388,22 @@ def item_meta(hash_):
     _mark_dirty(WDEF_CACHE, _wdefs)
     return _wdefs[k]
 
+def weapon_bucket_of(hash_):
+    """Weapon equip slot (Kinetic/Energy/Power) from the item def, cached into
+    the weapon-def cache. Needed for VAULT instances, whose raw bucketHash is
+    the vault bucket, not the equip slot. Older cache entries predate the
+    'bucket' key and are upgraded with one def fetch on first use."""
+    m = item_meta(hash_)
+    if "bucket" not in m:
+        try:
+            d = api_get("/Destiny2/Manifest/DestinyInventoryItemDefinition/%s/" % hash_)
+            b = d.get("inventory", {}).get("bucketTypeHash")
+        except (SystemExit, urllib.error.HTTPError, urllib.error.URLError):
+            return None                    # transient failure — don't cache a miss
+        m["bucket"] = WEAPON_BUCKETS.get(b)
+        _mark_dirty(WDEF_CACHE, _wdefs)
+    return m["bucket"]
+
 # Curated behavioural weapon perks, split into VALUE TIERS per the owner's policy
 # (boss DPS / ad-clear > ability regen > handling). VALUED_PERKS (DPS/ad-clear +
 # ability) are worth keeping a *distinct* duplicate for; FILLER_PERKS
@@ -523,6 +539,7 @@ def _collect_weapons(prof, sockets_data, reuse_data, protected, extra_perks=froz
         for it in inv.get("items", []):
             it["_loc"] = "Equip " + cid[-4:]; raw.append(it)
 
+    inst_data = prof.get("itemComponents", {}).get("instances", {}).get("data", {})
     weapons = []
     for it in raw:
         iid = it.get("itemInstanceId")
@@ -537,6 +554,11 @@ def _collect_weapons(prof, sockets_data, reuse_data, protected, extra_perks=froz
                         for h in item_selectable_perks(iid, reuse_data)]
         weapons.append({
             "name": meta["name"], "loc": it["_loc"], "iid": iid,
+            "hash": it["itemHash"],
+            "power": inst_data.get(iid, {}).get("primaryStat", {}).get("value", 0),
+            # character items carry their real slot; vault items report the vault
+            # bucket (None here) and are resolved later via weapon_bucket_of()
+            "bucket": WEAPON_BUCKETS.get(it.get("bucketHash")),
             "tier": meta.get("tier"), "type": meta.get("type", ""),
             "perks": perks, "sig": frozenset(perks),
             "traits": set(perks) & TRAIT_PERKS,   # currently-slotted behavioural perks
@@ -678,6 +700,32 @@ def cmd_scan(do_lock=False):
                 w["reason"] = "distinct roll of %s - your call" % nm
                 review.append(w); kept.append(w)
 
+    # Power-floor protection: character max power counts your single best item
+    # per weapon slot, so the highest-power instance in each bucket must never
+    # be dismantled — even a junk roll. All ties at the max survive. Buckets:
+    # character copies carry theirs; vault copies borrow a sibling's or cost one
+    # cached def fetch.
+    hash_bucket = {w["hash"]: w["bucket"] for w in weapons if w["bucket"]}
+    for w in weapons:
+        if not w["bucket"]:
+            w["bucket"] = hash_bucket.get(w["hash"]) or weapon_bucket_of(w["hash"])
+    _flush_caches()
+    bucket_max = {}
+    for w in weapons:
+        if w["bucket"]:
+            bucket_max[w["bucket"]] = max(bucket_max.get(w["bucket"], 0), w["power"])
+    promoted = [w for w in dismantle
+                if w["bucket"] and w["power"]
+                and w["power"] == bucket_max[w["bucket"]]]
+    for w in promoted:
+        dismantle.remove(w)
+        w["reason"] = ("highest power in %s slot (%d) - never dismantle"
+                       % (w["bucket"], w["power"]))
+        keep.append(w)
+    if promoted:
+        print("\n  power-floor: %d dismantle candidate(s) promoted to KEEP "
+              "(highest power in their slot)" % len(promoted))
+
     print("\n===== VAULT CLEANUP (%d weapons) =====" % len(weapons))
     print("  KEEP:      %d" % len(keep))
     print("  DISMANTLE: %d   (worse/dup rolls — a better copy is always kept)" % len(dismantle))
@@ -699,7 +747,7 @@ def cmd_scan(do_lock=False):
         return {"name": w["name"], "loc": w["loc"], "id": w["iid"],
                 "reason": w["reason"], "perks": sorted(w["traits"]),
                 "can_roll": sorted(w["pool"]), "all_perks": sorted(w["perks"]),
-                "tier": w["tier"]}
+                "tier": w["tier"], "power": w["power"], "bucket": w["bucket"]}
     report = {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "summary": {"weapons": len(weapons), "keep": len(keep),
@@ -913,6 +961,7 @@ def collect_armor(prof):
             # gearTier is the Armor Gear Tier (1-5; 0 = legacy/pre-tier armor) —
             # NOT rarity. Read from the instance component, not the item def.
             "gt": inst_data.get(iid, {}).get("gearTier", 0),
+            "power": inst_data.get(iid, {}).get("primaryStat", {}).get("value", 0),
             "top2": {top[0][0], top[1][0]},   # archetype = two highest stats
         })
     return out
@@ -1174,6 +1223,27 @@ def cmd_armor_cleanup(do_lock=False):
                     protected.add(it["itemInstanceId"])
     keep, dismantle, review, offclass = classify_armor(pieces, protected)
 
+    # Power-floor protection, armor edition: armor is class-locked, so each
+    # character's max power counts its own class's best piece per slot — the
+    # highest-power piece in every (class, slot) group must never be dismantled.
+    # (Off-class pieces are already locked wholesale, but compute per class
+    # anyway so the rule stays correct if that ever changes.)
+    slot_max = {}
+    for p in pieces:
+        k = (p["classType"], p["slot"])
+        slot_max[k] = max(slot_max.get(k, 0), p.get("power", 0))
+    promoted = [p for p in dismantle
+                if p.get("power")
+                and p["power"] == slot_max[(p["classType"], p["slot"])]]
+    for p in promoted:
+        dismantle.remove(p)
+        p["reason"] = ("highest power %s (%d) - never dismantle"
+                       % (p["slot"], p["power"]))
+        keep.append(p)
+    if promoted:
+        print("\n  power-floor: %d dismantle candidate(s) promoted to KEEP "
+              "(highest power in their slot)" % len(promoted))
+
     print("\n===== WARLOCK ARMOR CLEANUP (%d pieces; %d off-class skipped) =====" %
           (len(keep) + len(dismantle) + len(review), len(offclass)))
     print("  KEEP:      %d" % len(keep))
@@ -1188,7 +1258,7 @@ def cmd_armor_cleanup(do_lock=False):
     def row(p):
         return {"name": p["name"], "iid": p["iid"], "slot": p["slot"],
                 "exotic": p["exotic"], "gt": p["gt"], "total": p["total"],
-                "reason": p["reason"]}
+                "power": p.get("power", 0), "reason": p["reason"]}
     save_json(os.path.join(HERE, "armor_cleanup_report.json"), {
         "account": name, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "summary": {"keep": len(keep), "dismantle": len(dismantle),

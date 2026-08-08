@@ -32,11 +32,26 @@ unlock-all → relock cycle (`--dry-run` previews);
 `equip-armor <build>` and `apply-loadout <build> <slot>` write to the **live character**
 (must be in orbit) — both take `--dry-run`, `--exotic`, `--weapon`, `--balance`.
 Requires the user to have already run `setup`/`login` (needs their Bungie app + token).
+`dismantle_all.py` chains the full pipeline (auto_vault --once → scan → armor-cleanup →
+sync_locks → auto_dismantle --feed), aborting on any step failure; `--dry-run` previews
+everything and skips the shred.
+`dashboard.py` serves a button-panel web UI for all of the above (plus the auto_* loops)
+at http://127.0.0.1:8765 — stdlib-only, streams output, stdin box for setup/login, and
+Stop sends Ctrl+Break which `_job_runner.py` remaps to KeyboardInterrupt so `finally:`
+cleanup (feed_dismantle's lock restore) still runs. Only registry-listed tools can run.
 
 ## How classification works
 `rules.yaml`: each key is an exact in-game item name; `require` is a list of perk-name groups;
 an item is KEEP only if it has ≥1 perk from **every** group. Perk names are case-sensitive and must
 match in-game text. `scan` writes `vault_report.json`.
+
+**Power-floor protection** (both scans, applied last): the highest-power item in each
+bucket is never dismantled — max power counts your best item per slot, so shredding it
+would lower it. Weapons: per Kinetic/Energy/Power slot; armor: per (class, slot). Ties
+at the max all survive; they're promoted to KEEP with reason "highest power … never
+dismantle". Vault weapons don't carry their slot, so `weapon_bucket_of()` resolves it
+from the item def (cached in `.weapon_defs_cache.json`; pre-existing entries are
+upgraded with one fetch each on first use).
 
 Two perk sets, and they are **not** interchangeable:
 - `TRAIT_PERKS` is **policy-scoped** — it drives sole-source coverage and duplicate collapse.

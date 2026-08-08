@@ -15,6 +15,11 @@ VAULT_REPORT.md
 *_cleanup_report.json
 scratch/
 
+# ==== Personal — per-user dashboard defaults saved by the setup wizard ====
+dashboard_settings.json
+# Claude Code local permission settings (personal)
+.claude/settings.local.json
+
 # ==== Generated / cached ====
 # screen-calibration for auto_dismantle.py — machine/resolution specific,
 # recreate with: auto_dismantle.py --calibrate
