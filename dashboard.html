@@ -25,8 +25,31 @@
   header span { color: var(--dim); font-size: 12px; }
   main { display: flex; flex: 1; min-height: 0; }
 
-  /* left: tools */
-  #tools { flex: 1.15; overflow-y: auto; padding: 14px 16px 40px; }
+  /* left: wizard + tools */
+  #left { flex: 1.15; overflow-y: auto; padding: 14px 16px 40px; }
+  #wizbtn {
+    margin-left: auto; color: var(--gold); border-color: #6e5a24; background: #2a2410;
+  }
+  #wizbtn:hover { background: #363012; }
+  #wizard {
+    border: 1px solid #6e5a24; border-radius: 10px; background: #191a12;
+    padding: 12px 14px; margin-bottom: 20px;
+  }
+  #wizard h2 { margin: 0 0 4px; font-size: 14px; color: var(--gold);
+               text-transform: uppercase; letter-spacing: .08em; }
+  #wizard .intro { color: var(--dim); font-size: 12px; margin: 0 0 10px; }
+  .wstep { display: flex; gap: 10px; padding: 9px 4px; border-top: 1px solid #262a1d; }
+  .wstep .mark { flex: none; width: 20px; text-align: center; }
+  .wstep .mark.ok { color: var(--green); }
+  .wstep .mark.todo { color: var(--dim); }
+  .wstep .body { flex: 1; }
+  .wstep .t { font-weight: 600; font-size: 13px; }
+  .wstep .d { color: var(--dim); font-size: 12px; margin: 2px 0 6px; }
+  .wstep .act { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .wstep input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 3px 7px; font-size: 12px;
+  }
   .group { margin-bottom: 22px; }
   .group h2 {
     font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
@@ -101,9 +124,13 @@
 <header>
   <h1>DESTINY VAULT</h1>
   <span id="pyinfo"></span>
+  <button id="wizbtn" onclick="toggleWizard()">⚙ Setup wizard</button>
 </header>
 <main>
-  <div id="tools"></div>
+  <div id="left">
+    <div id="wizard" style="display:none"></div>
+    <div id="tools"></div>
+  </div>
   <div id="side">
     <div id="jobs"><div id="empty">No jobs yet — press a button.</div></div>
     <pre id="console"></pre>
@@ -269,11 +296,122 @@ async function sendStdin() {
 }
 $("stdin") && $("stdin").addEventListener("keydown", e => { if (e.key === "Enter") sendStdin(); });
 
-(async function init() {
+/* ---------------- setup wizard ---------------- */
+let wizardOpen = false;
+
+function toggleWizard() {
+  wizardOpen = !wizardOpen;
+  $("wizard").style.display = wizardOpen ? "" : "none";
+  if (wizardOpen) refreshWizard();
+}
+
+async function reloadTools() {
   const r = await api("/api/tools");
+  TOOLS = {};
   for (const g of r.groups) for (const t of g.tools) TOOLS[t.id] = t;
-  $("pyinfo").textContent = r.python;
   renderTools(r.groups);
+  renderJobs();
+}
+
+// run a tool with explicit opts (missing keys fall back to server defaults)
+async function wizRun(tool, opts) {
+  try {
+    const r = await api("/api/run", {tool, opts: opts || {}});
+    selectJob(r.id);
+    refreshJobs();
+  } catch (e) { toast(e.message); }
+}
+
+async function wizCopyExamples() {
+  try {
+    const r = await api("/api/copy-examples", {});
+    toast(r.created.length ? "Created: " + r.created.join(", ")
+                           : "rules.yaml and preferences.yaml already exist");
+  } catch (e) { toast(e.message); }
+  refreshWizard();
+}
+
+async function wizSaveDevice() {
+  const v = $("wiz-device").value.trim();
+  if (!v) { toast("Enter a device-name substring first (see the list output)."); return; }
+  try { await api("/api/settings", {device: v}); } catch (e) { toast(e.message); return; }
+  await reloadTools(); refreshWizard();
+}
+
+async function wizSaveAudio() {
+  try {
+    await api("/api/settings", {threshold: $("wiz-threshold").value,
+                                settle: $("wiz-settle").value});
+  } catch (e) { toast(e.message); return; }
+  await reloadTools(); refreshWizard();
+}
+
+function wstep(done, title, desc, actions) {
+  return `<div class="wstep">
+    <div class="mark ${done ? "ok" : "todo"}">${done ? "✔" : "○"}</div>
+    <div class="body"><div class="t">${title}</div>
+      <div class="d">${desc}</div>
+      <div class="act">${actions}</div></div></div>`;
+}
+
+async function refreshWizard() {
+  let s;
+  try { s = await api("/api/setup-status"); } catch (e) { toast(e.message); return; }
+  const set = s.settings || {};
+  const dev = set.device || "";
+  $("wizard").innerHTML = `
+    <h2>First-run setup</h2>
+    <p class="intro">Work top to bottom — each step's output appears in the console
+      on the right. Prereqs: Python venv with <b>pyyaml</b> (everything) and
+      <b>pyaudiowpatch</b> (auto-dismantle only): <code>pip install pyyaml pyaudiowpatch</code>.
+      Using: ${s.python}${s.venv ? "" : " ⚠ no venv/ found — create one first"}</p>
+    ${wstep(s.rules && s.preferences, "Personal config files",
+      "Copy rules.example.yaml → rules.yaml (your god-roll rules) and " +
+      "preferences.example.yaml → preferences.yaml (your class/playstyle). " +
+      "Both are gitignored; edit them to taste afterwards.",
+      `<button onclick="wizCopyExamples()">Create from examples</button>`)}
+    ${wstep(s.config, "Bungie app credentials",
+      "Create an app at bungie.net/en/Application — OAuth Client Type " +
+      "<b>Confidential</b> (enables ~90-day silent refresh), redirect URL exactly " +
+      "<code>https://localhost:7777/callback</code>. Then run setup and answer the " +
+      "prompts in the input box below the console.",
+      `<button onclick="wizRun('setup')">Run setup</button>`)}
+    ${wstep(s.token, "Log in",
+      "A browser tab opens for Bungie authorization. Afterwards it lands on an " +
+      "error page — that's expected; copy that page's FULL URL and paste it into " +
+      "the input box below the console.",
+      `<button onclick="wizRun('login')">Run login</button>`)}
+    ${wstep(!!set.device, "Audio device",
+      "auto-dismantle listens to your speaker output for the dismantle shatter. " +
+      "List your output devices, then enter a unique name fragment of the one " +
+      "Destiny plays through (e.g. “Speakers” or “Headphones”).",
+      `<button onclick="wizRun('auto-dismantle', {mode:'--list-devices'})">List devices</button>
+       <input id="wiz-device" placeholder="device substring" value="${dev.replace(/"/g, "&quot;")}">
+       <button onclick="wizSaveDevice()">Save</button>`)}
+    ${wstep("threshold" in set, "Audio threshold",
+      "With the game making noise, run the level test and watch the meter in the " +
+      "console: normal gameplay should stay UNDER the threshold, the dismantle " +
+      "shatter should clear it. 0.03 is a good start. Settle = seconds for vault-" +
+      "arrival chimes to fade between feed batches.",
+      `<button onclick="wizRun('auto-dismantle', {mode:'--audio-test'})">Run level test</button>
+       threshold <input id="wiz-threshold" size="6" value="${"threshold" in set ? set.threshold : 0.03}">
+       settle <input id="wiz-settle" size="4" value="${"settle" in set ? set.settle : 4}">
+       <button onclick="wizSaveAudio()">Save</button>`)}
+    ${wstep(s.positions, "Mouse calibration (16 spots)",
+      "In game: Windowed Fullscreen, character screen open. Run calibrate, then for " +
+      "each of the 8 buckets hover (1) the EQUIPPED item's icon, press F8, then (2) " +
+      "slot 1 of the flyout that opens, press F8 again. Saved to " +
+      "dismantle_positions.json (machine/resolution specific).",
+      `<button onclick="wizRun('auto-dismantle', {mode:'--calibrate'})">Run calibrate</button>`)}
+  `;
+}
+
+(async function init() {
+  await reloadTools();
+  const r = await api("/api/setup-status");
+  $("pyinfo").textContent = r.python;
+  // fresh clone with nothing configured -> open the wizard automatically
+  if (!r.config || !r.token) toggleWizard();
   refreshJobs();
   setInterval(refreshJobs, 1200);
   setInterval(pollOutput, 700);

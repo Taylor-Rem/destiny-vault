@@ -44,6 +44,60 @@ except Exception:
     BUILD_NAMES = ["super-class", "super-grenade", "super-melee",
                    "class-grenade", "grenade-class"]
 
+# Per-user defaults saved by the setup wizard (gitignored — every clone owner
+# has their own audio device, threshold, and screen calibration).
+SETTINGS_PATH = os.path.join(HERE, "dashboard_settings.json")
+AUDIO_KEYS = ("device", "threshold", "settle")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(new):
+    s = load_settings()
+    if "device" in new:
+        s["device"] = str(new["device"]).strip()
+    for k in ("threshold", "settle"):
+        if k in new and new[k] not in (None, ""):
+            s[k] = float(new[k])
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(s, f, indent=2)
+    return s
+
+
+def setup_status():
+    def has(name):
+        return os.path.exists(os.path.join(HERE, name))
+    return {
+        "config": has(".destiny_config.json"),
+        "token": has(".destiny_token.json"),
+        "rules": has("rules.yaml"),
+        "preferences": has("preferences.yaml"),
+        "positions": has("dismantle_positions.json"),
+        "settings": load_settings(),
+        "python": VENV_PY,
+        "venv": os.path.join("venv", "") in VENV_PY or "venv" in VENV_PY,
+    }
+
+
+def copy_examples():
+    """Create personal config files from the checked-in examples (never
+    overwrites an existing file)."""
+    import shutil
+    made = []
+    for src, dst in (("rules.example.yaml", "rules.yaml"),
+                     ("preferences.example.yaml", "preferences.yaml")):
+        s, d = os.path.join(HERE, src), os.path.join(HERE, dst)
+        if os.path.exists(s) and not os.path.exists(d):
+            shutil.copyfile(s, d)
+            made.append(dst)
+    return made
+
 # ---------------------------------------------------------------------------
 # tool registry — the ONLY commands the server will run. The client sends a
 # tool id + option values; argv is built here against this spec, never taken
@@ -283,10 +337,15 @@ SAFE_DISMANTLE_MODES = {"--calibrate", "--audio-test", "--test-hold",
 
 
 def build_argv(tool, opts):
-    """Turn client option values into argv, validating against the spec."""
+    """Turn client option values into argv, validating against the spec.
+    Audio-related defaults come from the wizard-saved settings when present."""
+    settings = load_settings()
     positionals, flags = [], []
     for o in tool.get("opts", []):
-        v = opts.get(o["key"], o.get("default"))
+        default = o.get("default")
+        if o["key"] in AUDIO_KEYS and o["key"] in settings:
+            default = settings[o["key"]]
+        v = opts.get(o["key"], default)
         typ = o["type"]
         if typ == "bool":
             if v:
@@ -478,7 +537,18 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif url.path == "/api/tools":
-            self._json({"groups": GROUPS, "python": VENV_PY})
+            # deep-copy the registry and fold wizard-saved audio defaults in,
+            # so the cards show what a plain Run will actually use
+            groups = json.loads(json.dumps(GROUPS))
+            settings = load_settings()
+            for g in groups:
+                for t in g["tools"]:
+                    for o in t.get("opts", []):
+                        if o["key"] in AUDIO_KEYS and o["key"] in settings:
+                            o["default"] = settings[o["key"]]
+            self._json({"groups": groups, "python": VENV_PY})
+        elif url.path == "/api/setup-status":
+            self._json(setup_status())
         elif url.path == "/api/jobs":
             with JOBS_LOCK:
                 jobs = sorted(JOBS.values(), key=lambda j: -j.started)
@@ -508,6 +578,10 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/stdin":
                 JOBS[int(body["id"])].send_stdin(str(body.get("text", "")))
                 self._json({"ok": True})
+            elif self.path == "/api/settings":
+                self._json({"settings": save_settings(body)})
+            elif self.path == "/api/copy-examples":
+                self._json({"created": copy_examples()})
             else:
                 self.send_error(404)
         except (ValueError, KeyError) as e:

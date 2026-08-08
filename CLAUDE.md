@@ -39,6 +39,10 @@ everything and skips the shred.
 at http://127.0.0.1:8765 — stdlib-only, streams output, stdin box for setup/login, and
 Stop sends Ctrl+Break which `_job_runner.py` remaps to KeyboardInterrupt so `finally:`
 cleanup (feed_dismantle's lock restore) still runs. Only registry-listed tools can run.
+Its ⚙ Setup wizard (auto-opens on fresh clones) walks new users through example-file
+copies, Bungie creds, OAuth, audio device/threshold, and mouse calibration; device/
+threshold/settle are saved to `dashboard_settings.json` (gitignored, per-user) and
+become the defaults for the dashboard AND `dismantle_all.py`.
 
 ## How classification works
 `rules.yaml`: each key is an exact in-game item name; `require` is a list of perk-name groups;

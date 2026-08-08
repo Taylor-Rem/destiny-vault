@@ -28,12 +28,24 @@ finally-cleanup like feed's keeper-lock restore still runs — and no later
 step starts.
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNNER = os.path.join(HERE, "_job_runner.py")
+
+
+def _wizard_settings():
+    """Per-user audio settings saved by the dashboard's setup wizard, so a
+    plain `dismantle_all.py` uses your calibrated device/threshold too."""
+    try:
+        with open(os.path.join(HERE, "dashboard_settings.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
 def run_step(idx, total, title, script_args):
@@ -64,11 +76,14 @@ def main():
         description="sweep -> scan -> armor-cleanup -> sync locks -> feed+shred")
     ap.add_argument("--dry-run", action="store_true",
                     help="preview: dry sweep, real reports, dry lock sync, no shred")
-    ap.add_argument("--device", default="Speakers",
-                    help="output device auto_dismantle monitors (default Speakers)")
-    ap.add_argument("--threshold", type=float, default=0.03,
-                    help="dismantle-sound peak threshold (default 0.03)")
-    ap.add_argument("--settle", type=float, default=4.0,
+    s = _wizard_settings()
+    ap.add_argument("--device", default=s.get("device", "Speakers"),
+                    help="output device auto_dismantle monitors (default: wizard "
+                         "setting, else Speakers)")
+    ap.add_argument("--threshold", type=float, default=s.get("threshold", 0.03),
+                    help="dismantle-sound peak threshold (default: wizard "
+                         "setting, else 0.03)")
+    ap.add_argument("--settle", type=float, default=s.get("settle", 4.0),
                     help="seconds for vault-arrival sounds to fade per feed batch")
     args = ap.parse_args()
 
