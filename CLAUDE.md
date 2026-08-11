@@ -21,6 +21,11 @@ Read this before doing vault work.
 - **`research/god-rolls.md` is the official per-weapon god-roll reference** (researched 2026-08-07,
   confidence-rated). `rules.yaml` is generated from its verdicts — update the doc first, then
   mirror into rules. Never dismantle on a LOW-confidence entry alone.
+- **`research/compendium/` is a local CSV mirror of the community Destiny Data Compendium**
+  (perk/mod/subclass/exotic behavior with tested numbers) — the best source for perk-behavior
+  facts. Rebuild with `fetch_compendium.py` if missing or stale (check `_meta.json` for the
+  fetch date). The CSVs are gitignored, so **directory-wide Grep/rg skips them** — search the
+  CSV file paths explicitly (or `rg --no-ignore`). See `research/compendium/README.md`.
 
 ## Commands
 Setup path: `setup` (creds) → `login` (OAuth) → `whoami`.

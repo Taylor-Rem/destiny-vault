@@ -43,3 +43,9 @@ Thumbs.db
 
 # ==== Personal god-roll rules (copy from rules.example.yaml) ====
 rules.yaml
+
+# ==== Destiny Data Compendium mirror — rebuild with fetch_compendium.py ====
+# The data is the Compendium authors' work and goes stale every patch; only the
+# fetcher script + README are committed.
+research/compendium/*.csv
+research/compendium/_meta.json
