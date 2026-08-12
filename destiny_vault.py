@@ -962,7 +962,9 @@ def collect_armor(prof):
             # NOT rarity. Read from the instance component, not the item def.
             "gt": inst_data.get(iid, {}).get("gearTier", 0),
             "power": inst_data.get(iid, {}).get("primaryStat", {}).get("value", 0),
-            "top2": {top[0][0], top[1][0]},   # archetype = two highest stats
+            # archetype = two highest stats; sorted list, not a set, so the
+            # piece dict stays JSON-serializable for armor_report.json
+            "top2": sorted((top[0][0], top[1][0])),
         })
     return out
 
@@ -1197,7 +1199,7 @@ def classify_armor(pieces, protected):
         elif p["gt"] < 4:
             p["reason"] = ("tier %d (<4)" % p["gt"]) if p["gt"] else "legacy (no tier)"
             dismantle.append(p)
-        elif not (p["top2"] <= DESIRED_STATS):
+        elif not (set(p["top2"]) <= DESIRED_STATS):
             lead = "Health" if "Health" in p["top2"] else "Weapons"
             p["reason"] = "%s-forward (top2 %s)" % (lead, "+".join(sorted(p["top2"])))
             dismantle.append(p)
