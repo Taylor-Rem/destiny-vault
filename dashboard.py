@@ -70,6 +70,31 @@ def save_settings(new):
     return s
 
 
+_AUDIO_CACHE = {"t": 0.0, "devices": []}
+
+
+def audio_devices(max_age=60.0):
+    """Full names of output devices that can be loopback-monitored (the
+    [Loopback] suffix stripped — a full name is still a valid --device
+    substring). Cached: enumeration opens WASAPI (~0.2s), and the list only
+    changes when hardware is (un)plugged. Empty if pyaudiowpatch is missing."""
+    now = time.time()
+    if now - _AUDIO_CACHE["t"] > max_age:
+        devs = []
+        try:
+            import pyaudiowpatch as pyaudio
+            p = pyaudio.PyAudio()
+            try:
+                for lb in p.get_loopback_device_info_generator():
+                    devs.append(lb["name"].replace(" [Loopback]", ""))
+            finally:
+                p.terminate()
+        except Exception:
+            devs = []
+        _AUDIO_CACHE.update(t=now, devices=devs)
+    return _AUDIO_CACHE["devices"]
+
+
 def setup_status():
     def has(name):
         return os.path.exists(os.path.join(HERE, name))
@@ -80,6 +105,7 @@ def setup_status():
         "preferences": has("preferences.yaml"),
         "positions": has("dismantle_positions.json"),
         "settings": load_settings(),
+        "audio_devices": audio_devices(),
         "python": VENV_PY,
         "venv": os.path.join("venv", "") in VENV_PY or "venv" in VENV_PY,
     }
@@ -325,6 +351,19 @@ GROUPS = [
                  {"key": "device", "label": "audio device (substring)",
                   "type": "text", "flag": "--device", "default": "Speakers"},
              ]},
+            {"id": "tune-threshold", "name": "tune-threshold",
+             "cmd": ["tune_threshold.py"],
+             "desc": "Record the speakers while you dismantle, then pick the "
+                     "audio threshold off an interactive waveform (opens in "
+                     "the browser). Type the chosen value in the input box to "
+                     "save it as the new default.",
+             "interactive": True,
+             "opts": [
+                 {"key": "seconds", "label": "record (s)", "type": "num",
+                  "flag": "--seconds", "default": 30, "min": 5, "max": 300},
+                 {"key": "device", "label": "audio device (substring)",
+                  "type": "text", "flag": "--device", "default": "Speakers"},
+             ]},
         ],
     },
 ]
@@ -541,11 +580,29 @@ class Handler(BaseHTTPRequestHandler):
             # so the cards show what a plain Run will actually use
             groups = json.loads(json.dumps(GROUPS))
             settings = load_settings()
+            devices = audio_devices()
             for g in groups:
                 for t in g["tools"]:
                     for o in t.get("opts", []):
                         if o["key"] in AUDIO_KEYS and o["key"] in settings:
                             o["default"] = settings[o["key"]]
+                        # device fields become real dropdowns of the machine's
+                        # output devices. The saved value may be a substring
+                        # ("Speakers") — resolve it to the first matching full
+                        # name; keep an unmatched one (unplugged?) selectable.
+                        # build_argv still validates against the registry's
+                        # "text" spec, so any select value passes through.
+                        if o["key"] == "device" and devices:
+                            cur = str(o.get("default") or "")
+                            match = next((d for d in devices
+                                          if cur and cur.lower() in d.lower()),
+                                         None)
+                            choices = list(devices)
+                            if cur and not match:
+                                choices.append(cur)
+                            o["type"] = "select"
+                            o["choices"] = choices
+                            o["default"] = match or cur or devices[0]
             self._json({"groups": groups, "python": VENV_PY})
         elif url.path == "/api/setup-status":
             self._json(setup_status())

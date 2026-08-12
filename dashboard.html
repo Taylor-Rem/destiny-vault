@@ -346,6 +346,21 @@ async function wizSaveAudio() {
   await reloadTools(); refreshWizard();
 }
 
+function deviceControl(devices, saved) {
+  // dropdown of the machine's real output devices; the saved value may be a
+  // substring, so preselect the first full name containing it. Text-input
+  // fallback if enumeration failed (pyaudiowpatch not installed yet).
+  const esc = t => t.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  if (!devices.length)
+    return `<input id="wiz-device" placeholder="device substring" value="${esc(saved)}">`;
+  let sel = devices.findIndex(d => saved && d.toLowerCase().includes(saved.toLowerCase()));
+  if (sel < 0 && saved) devices = devices.concat([saved]);   // unplugged but saved
+  if (sel < 0) sel = devices.length - (saved ? 1 : devices.length);
+  return `<select id="wiz-device">${devices.map((d, i) =>
+    `<option value="${esc(d)}" ${i === sel ? "selected" : ""}>${esc(d)}</option>`
+  ).join("")}</select>`;
+}
+
 function wstep(done, title, desc, actions) {
   return `<div class="wstep">
     <div class="mark ${done ? "ok" : "todo"}">${done ? "✔" : "○"}</div>
@@ -383,16 +398,14 @@ async function refreshWizard() {
       `<button onclick="wizRun('login')">Run login</button>`)}
     ${wstep(!!set.device, "Audio device",
       "auto-dismantle listens to your speaker output for the dismantle shatter. " +
-      "List your output devices, then enter a unique name fragment of the one " +
-      "Destiny plays through (e.g. “Speakers” or “Headphones”).",
-      `<button onclick="wizRun('auto-dismantle', {mode:'--list-devices'})">List devices</button>
-       <input id="wiz-device" placeholder="device substring" value="${dev.replace(/"/g, "&quot;")}">
+      "Pick the output device Destiny plays through.",
+      `${deviceControl(s.audio_devices || [], dev)}
        <button onclick="wizSaveDevice()">Save</button>`)}
     ${wstep("threshold" in set, "Audio threshold",
-      "With the game making noise, run the level test and watch the meter in the " +
-      "console: normal gameplay should stay UNDER the threshold, the dismantle " +
-      "shatter should clear it. 0.03 is a good start. Settle = seconds for vault-" +
-      "arrival chimes to fade between feed batches.",
+      "Run tune-threshold (In-game automation group), dismantle a couple of items " +
+      "— include an exotic; they shatter QUIETER — and pick the value off the " +
+      "waveform it opens: above idle noise, below the quietest shatter. Settle = " +
+      "seconds for vault-arrival chimes to fade between feed batches.",
       `<button onclick="wizRun('auto-dismantle', {mode:'--audio-test'})">Run level test</button>
        threshold <input id="wiz-threshold" size="6" value="${"threshold" in set ? set.threshold : 0.03}">
        settle <input id="wiz-settle" size="4" value="${"settle" in set ? set.settle : 4}">

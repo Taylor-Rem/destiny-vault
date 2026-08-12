@@ -19,7 +19,8 @@ alternates phases: pull a batch from the vault, wait --settle seconds for the
 arrival chimes to fade, then shred in silence; repeat until the pile is gone.
 
     ./venv/Scripts/python.exe auto_dismantle.py --calibrate   # record the 8 spots (F8)
-    ./venv/Scripts/python.exe auto_dismantle.py --audio-test  # tune --threshold
+    ./venv/Scripts/python.exe tune_threshold.py               # tune --threshold visually
+    ./venv/Scripts/python.exe auto_dismantle.py --audio-test  # quick live meter
     ./venv/Scripts/python.exe auto_dismantle.py --feed        # the full factory line
     ./venv/Scripts/python.exe auto_dismantle.py               # shred pre-filled buckets only
 
@@ -255,17 +256,21 @@ def main():
                          "Default: the default output device")
     ap.add_argument("--threshold", type=float, default=0.03,
                     help="speaker peak that counts as a dismantle (default 0.03; "
-                         "measure with --audio-test — the shatter should clear it, "
-                         "the soft exotic-hold noise should not)")
+                         "pick it visually with tune_threshold.py — it must sit "
+                         "above idle noise but below the QUIETEST shatter, and "
+                         "exotic shatters run quieter than legendary ones)")
     ap.add_argument("--min-hold", type=float, default=1.0,
                     help="ignore spikes during the first N seconds of each hold — "
                          "prevents transients from causing tap-releases, which "
                          "toggle the item's LOCK in-game (default 1.0)")
-    ap.add_argument("--timeout", type=float, default=6.0,
-                    help="hard ceiling in seconds to hold F waiting for the spike "
-                         "(default 6.0). Only the first holds run this long: once a "
-                         "real dismantle has been heard, silent holds give up after "
-                         "~2 measured dismantle times, so empty buckets advance fast")
+    ap.add_argument("--timeout", type=float, default=4.0,
+                    help="seconds to hold F waiting for the shatter before giving "
+                         "the slot up as silent (default 4.0). Must exceed the "
+                         "SLOWEST radial fill — an exotic's fills slower than a "
+                         "legendary's and its first hold is always silent (it only "
+                         "opens the confirm dialog); cut it short and the exotic "
+                         "never dismantles. Every silent pass on an empty bucket "
+                         "costs this long")
     ap.add_argument("--empty-passes", type=int, default=2,
                     help="consecutive silent holds on a bucket before moving to the "
                          "next (default 2). An exotic's confirm step is one silent "
@@ -350,8 +355,6 @@ def main():
     shredded = 0
     idle_rounds = 0
     aborted = False
-    avg_hold = None      # EMA of hold-start -> shatter, measured off real dismantles;
-                         # silent holds give up at 2x this instead of the full --timeout
     try:
         while idle_rounds < args.max_idle and not aborted:
             sent = 0
@@ -389,11 +392,7 @@ def main():
                     t0 = time.time()
                     spiked = False
                     stop = None           # 'abort' (F9 / mouse moved) | 'unfocus' (alt-tab)
-                    # a silent slot isn't worth the full --timeout once we know how
-                    # long a dismantle actually takes: give up after ~2 of them
                     limit = args.timeout
-                    if avg_hold is not None:
-                        limit = min(args.timeout, max(args.min_hold + 0.5, 2 * avg_hold))
 
                     def check():
                         if key_down(VK_F9):
@@ -421,9 +420,6 @@ def main():
                             break
                         stop = check()
                     f_key(False)
-                    if spiked:
-                        dur = time.time() - t0
-                        avg_hold = dur if avg_hold is None else 0.7 * avg_hold + 0.3 * dur
                     if stop == "abort":
                         aborted = True
                         break

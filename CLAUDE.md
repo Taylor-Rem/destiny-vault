@@ -37,6 +37,11 @@ unlock-all → relock cycle (`--dry-run` previews);
 `equip-armor <build>` and `apply-loadout <build> <slot>` write to the **live character**
 (must be in orbit) — both take `--dry-run`, `--exotic`, `--weapon`, `--balance`.
 Requires the user to have already run `setup`/`login` (needs their Bungie app + token).
+`tune_threshold.py` records the speaker loopback while the user dismantles, then opens an
+interactive waveform (scratch/threshold_tuner_<timestamp>.html, one per run) to pick the
+audio `--threshold` visually
+— its save prompt writes `dashboard_settings.json`, the shared default. Prefer it over
+`auto_dismantle.py --audio-test` (a blink-and-miss live meter).
 `dismantle_all.py` chains the full pipeline (auto_vault --once → scan → armor-cleanup →
 sync_locks → auto_dismantle --feed), aborting on any step failure; `--dry-run` previews
 everything and skips the shred.
