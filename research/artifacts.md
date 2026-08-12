@@ -70,7 +70,7 @@ Generalist Void/orb/survivability artifact. Best fit for Prismatic weapon+abilit
 - **Prismatic Transfer** — Casting your Super grants allies with a non-matching Super element a weapon damage bonus (~+20%).
 - **Argent Blade** — With Armor Charge, Sword damage consumes a charge to grant Argent Blade (stacking Sword damage).
 - **Expanding Abyss** — "**Void sources** deal increased damage to weakened targets." *(⚠️ Corrected 2026-08-02 from the live API sandbox-perk text, after the owner flagged the error. An earlier draft restricted this to **Void weapons only, NOT Supers/abilities** — that is wrong. The API says "Void **sources**", which includes Void **Supers and abilities**: Nova Bomb into a weakened target does benefit. Owner confirmed in-game.)*
-- **Shieldcrush** — Defensive keywords (overshield/Frost Armor/Woven Mail) empower your melee; offensive keywords empower grenades.
+- **Shieldcrush** — Defensive keywords (overshield/Frost Armor/Woven Mail) empower your melee; offensive keywords empower grenades. **While Amplified or Radiant, grenade energy recharges faster.** *(⚠️ Corrected 2026-08-08 from the owner's in-game read-out: the Amplified/Radiant→grenade-regen clause was missing from earlier drafts. It changes the perk's viability — on any build with high Radiant uptime (e.g. Radiant Orbs), Shieldcrush is live even with no defensive keywords and a Healing Grenade.)*
 - **Transference** — "Gain increased grenade and melee damage while transcendent. Weapon final blows **while transcendent** refund **Light and Dark energy** after Transcendence ends." *(⚠️ Corrected 2026-08-02 from the live API sandbox-perk text, after the owner flagged the error. An earlier draft claimed this refunded **Super energy** — it does NOT. It refunds **Transcendence** (Light/Dark) energy, i.e. it accelerates your next Transcendence, not your Super. Note also the timing: the final blows must land **while transcendent**; only the payout is deferred until Transcendence ends. This perk is **not** a Super-generation tool.)*
 - **Sniper's Meditation** — Sniper Rifle hits grant a stacking Sniper Rifle damage bonus.
 - **Shock and Awe** — While Amplified, Arc final blows trigger a Jolting Arc explosion.
@@ -216,7 +216,7 @@ non-Stasis builds.**
 
 **Tier 3**
 - **Radiant Shrapnel** — Sustained weapon damage while Radiant generates a volley of explosive Solar projectiles that Scorch on impact.
-- **Shield Crush** — (= Shieldcrush) Defensive keywords empower your melee; offensive keywords empower grenades.
+- **Shield Crush** — (= Shieldcrush) Defensive keywords empower your melee; offensive keywords empower grenades; while Amplified or Radiant, grenade energy recharges faster *(see §3 correction note)*.
 - **Elemental Overdrive** — Picking up an elemental pickup or Tangle grants increased damage to weapons of the same element.
 - **Tangled Web** — Creating a Tangle by defeating a Strand-debuffed target Suspends nearby combatants.
 - **Frigid Glare** — While Frost Armor is active, Stasis precision final blows cause a Freezing burst.
