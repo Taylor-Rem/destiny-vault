@@ -113,6 +113,33 @@
     font: 12.5px Consolas, monospace;
   }
   #empty { color: var(--dim); padding: 30px; text-align: center; }
+
+  /* armor key-coverage tracker */
+  #covbtn { color: var(--accent); }
+  #coverage {
+    border: 1px solid var(--border); border-radius: 10px; background: var(--card);
+    padding: 12px 14px; margin-bottom: 20px;
+  }
+  #coverage h2 { margin: 0 0 4px; font-size: 14px; color: var(--gold);
+                 text-transform: uppercase; letter-spacing: .08em; }
+  #coverage .intro { color: var(--dim); font-size: 12px; margin: 0 0 10px; }
+  .covslot { margin-bottom: 14px; }
+  .covslot h3 { margin: 0 0 4px; font-size: 13px; color: var(--text); }
+  .covslot h3 .pct { color: var(--dim); font-weight: normal; font-size: 12px; }
+  .covtab { border-collapse: collapse; font-size: 12px; }
+  .covtab th, .covtab td {
+    border: 1px solid var(--border); padding: 2px 8px; text-align: center;
+  }
+  .covtab th { color: var(--dim); font-weight: 600; }
+  .covtab td.arch { text-align: left; color: var(--dim); white-space: nowrap; }
+  .covtab td.na { background: #10151d; color: #333c49; }
+  .covtab td.t5 { color: var(--green); font-weight: 600; }
+  .covtab td.t4 { color: var(--amber); }
+  .covtab td.lo { color: var(--dim); }
+  .covtab td.miss { color: var(--red); }
+  .covhp { color: var(--dim); font-size: 12px; margin: 3px 0 0; }
+  .pull { cursor: pointer; color: var(--accent); }
+  .pull:hover { text-shadow: 0 0 6px var(--accent); }
   #toast {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     background: #3a2222; border: 1px solid var(--red); color: #ffb4ae;
@@ -125,10 +152,12 @@
   <h1>DESTINY VAULT</h1>
   <span id="pyinfo"></span>
   <button id="wizbtn" onclick="toggleWizard()">⚙ Setup wizard</button>
+  <button id="covbtn" onclick="toggleCoverage()">🛡 Armor keys</button>
 </header>
 <main>
   <div id="left">
     <div id="wizard" style="display:none"></div>
+    <div id="coverage" style="display:none"></div>
     <div id="tools"></div>
   </div>
   <div id="side">
@@ -271,7 +300,7 @@ function renderJobs() {
 }
 
 async function refreshJobs() {
-  try { jobs = (await api("/api/jobs")).jobs; renderJobs(); } catch (e) {}
+  try { jobs = (await api("/api/jobs")).jobs; renderJobs(); covWatch(); } catch (e) {}
 }
 
 async function pollOutput() {
@@ -295,6 +324,100 @@ async function sendStdin() {
   catch (e) { toast(e.message); }
 }
 $("stdin") && $("stdin").addEventListener("keydown", e => { if (e.key === "Enter") sendStdin(); });
+
+/* ---------------- armor key-coverage tracker ---------------- */
+let covOpen = false;
+let covLastScan = null;   // started-time of the newest finished armor-scan job
+
+function toggleCoverage() {
+  covOpen = !covOpen;
+  $("coverage").style.display = covOpen ? "" : "none";
+  if (covOpen) refreshCoverage();
+}
+
+// tertiary columns, owner's preferred order (Health is never a wanted tertiary)
+const COV_STATS = ["Melee", "Grenade", "Super", "Class", "Weapons"];
+
+async function refreshCoverage() {
+  let r;
+  try { r = await api("/api/armor-coverage"); }
+  catch (e) {
+    $("coverage").innerHTML = `<h2>Armor key coverage</h2>
+      <p class="intro">${e.message} — run <b>armor-scan</b> (Read-only group), then reopen.</p>`;
+    return;
+  }
+  const cov = r.coverage;
+  // archetype -> {primary, secondary, tertiary set}
+  const arch = new Map();
+  for (const w of cov.wanted) {
+    if (!arch.has(w.archetype))
+      arch.set(w.archetype, {pri: w.primary, sec: w.secondary, ters: new Map()});
+    arch.get(w.archetype).ters.set(w.tertiary, w.key);
+  }
+  const ab = s => ({Weapons: "W", Health: "H", Class: "C", Grenade: "G",
+                    Super: "S", Melee: "M"}[s] || s[0]);
+  let html = `<h2>Armor key coverage</h2>
+    <p class="intro">Key = primary_secondary_tertiary (Warlock legendaries, tier 4+, best copy).
+    Rows are archetypes (primary/secondary), columns the tertiary stat.
+    <span class="covtab"><span style="color:var(--green)">T5</span> /
+    <span style="color:var(--amber)">T4</span> owned · <span style="color:var(--red)">·</span>
+    = missing (farm it) · dark = can't roll</span>.
+    From armor-scan of ${r.generated || "?"}.
+    <button style="margin-left:8px" onclick="refreshCoverage()">refresh</button></p>`;
+  for (const slot of cov.slots) {
+    const owned = Object.keys(cov.cells).filter(k => k.startsWith(slot + "|"));
+    const t5 = owned.filter(k => cov.cells[k].gt >= 5).length;
+    html += `<div class="covslot"><h3>${slot}
+      <span class="pct">${owned.length}/${cov.wanted.length} keys · ${t5} at T5</span></h3>
+      <table class="covtab"><tr><th>archetype</th>${
+        COV_STATS.map(s => `<th>${ab(s)}</th>`).join("")}</tr>`;
+    for (const [name, a] of arch) {
+      html += `<tr><td class="arch">${name} <span style="opacity:.7">(${ab(a.pri)}/${ab(a.sec)})</span></td>`;
+      for (const s of COV_STATS) {
+        const key = a.ters.get(s);
+        if (!key) { html += `<td class="na"></td>`; continue; }
+        const c = cov.cells[slot + "|" + key];
+        if (!c) { html += `<td class="miss" title="${key} — not owned">·</td>`; continue; }
+        const cls = c.gt >= 5 ? "t5" : (c.gt === 4 ? "t4" : "lo");
+        html += `<td class="${cls}" title="${c.name} (total ${c.total})${
+          c.loc === "char" ? " — already on character" : ""}">T${c.gt}${pullArrow(c)}</td>`;
+      }
+      html += `</tr>`;
+    }
+    const hp = cov.health[slot];
+    html += `</table><p class="covhp">Health-primary option: ${
+      hp ? `T${hp.gt} ${hp.name} (${hp.key.replaceAll("_", "/")}, total ${hp.total})${pullArrow(hp)}`
+         : '<span style="color:var(--red)">none owned</span>'}</p></div>`;
+  }
+  $("coverage").innerHTML = html;
+}
+
+// ⬅ = transfer this piece from the vault to its character (runs the `pull`
+// tool as a normal job). Only vault-held pieces get an arrow; iids are numeric
+// so inlining them in onclick is safe.
+function pullArrow(c) {
+  return c.loc === "vault"
+    ? ` <span class="pull" title="pull to character" onclick="pullPiece(event,'${c.iid}')">⬅</span>`
+    : "";
+}
+
+async function pullPiece(ev, iid) {
+  ev.stopPropagation();
+  try {
+    const r = await api("/api/run", {tool: "pull", opts: {iid}});
+    selectJob(r.id);
+    refreshJobs();
+  } catch (e) { toast(e.message); }
+}
+
+// refetch the matrix when a fresh armor-scan finishes while the panel is open
+function covWatch() {
+  const done = jobs.filter(j => j.tool === "armor-scan" && j.status === "done");
+  if (!done.length) return;
+  const newest = Math.max(...done.map(j => j.started));
+  if (covLastScan !== null && newest > covLastScan && covOpen) refreshCoverage();
+  covLastScan = Math.max(covLastScan ?? 0, newest);
+}
 
 /* ---------------- setup wizard ---------------- */
 let wizardOpen = false;

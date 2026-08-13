@@ -212,6 +212,14 @@ GROUPS = [
         "note": "Writes to the LIVE character — be in orbit. Dry-run is on by "
                 "default; untick it to actually equip.",
         "tools": [
+            {"id": "pull", "name": "pull", "cmd": vault("pull"),
+             "desc": "Transfer an item instance from the vault to its class's "
+                     "character (the ⬅ arrows in the Armor keys panel run this). "
+                     "Reversible; works anywhere, no orbit needed.",
+             "opts": [
+                 {"key": "iid", "label": "instance id", "type": "text",
+                  "positional": True, "default": "", "required": True},
+             ]},
             {"id": "equip-armor", "name": "equip-armor",
              "cmd": vault("equip-armor"),
              "desc": "Equip the best-ranked armor set for a build.",
@@ -606,6 +614,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"groups": groups, "python": VENV_PY})
         elif url.path == "/api/setup-status":
             self._json(setup_status())
+        elif url.path == "/api/armor-coverage":
+            # coverage matrix computed by `armor-scan` (destiny_vault.armor_coverage)
+            # and stored in armor_report.json — this endpoint just serves it, so
+            # the tab always reflects the latest scan.
+            try:
+                with open(os.path.join(HERE, "armor_report.json"),
+                          encoding="utf-8") as f:
+                    rep = json.load(f)
+            except (OSError, ValueError):
+                self._json({"error": "no armor_report.json yet — run armor-scan"}, 404)
+                return
+            cov = rep.get("coverage")
+            if not cov:
+                self._json({"error": "report predates the key tracker — re-run armor-scan"}, 404)
+                return
+            self._json({"generated": rep.get("generated"), "coverage": cov})
         elif url.path == "/api/jobs":
             with JOBS_LOCK:
                 jobs = sorted(JOBS.values(), key=lambda j: -j.started)

@@ -867,6 +867,27 @@ def _lock_keepers(token, mtype, keepers, prof):
 # Resilience->Health) so we never hardcode a stale hash->name mapping.
 ARMOR_SLOTS = {26: "Helmet", 27: "Gauntlets", 28: "Chest", 29: "Legs", 30: "Class Item"}
 ARMOR_STATS = {"Weapons", "Health", "Class", "Grenade", "Super", "Melee"}
+# Canonical display/tie-break order for the six Armor 3.0 stats. Ties in stat
+# VALUE (possible after masterwork +5 spread) resolve to this order so a
+# piece's key is deterministic.
+STAT_ORDER = ["Weapons", "Health", "Class", "Grenade", "Super", "Melee"]
+# The 12 Armor 3.0 archetypes: (name, primary stat, secondary stat). This is
+# the drop taxonomy — a piece's primary+secondary pair always matches one of
+# these (DESTINY_REFERENCE.md §9). Used by the key-coverage tracker.
+ARMOR_ARCHETYPES = [
+    ("Gunner",        "Weapons", "Grenade"),
+    ("Bulwark",       "Health",  "Class"),
+    ("Specialist",    "Class",   "Weapons"),
+    ("Paragon",       "Super",   "Melee"),
+    ("Grenadier",     "Grenade", "Super"),
+    ("Brawler",       "Melee",   "Health"),
+    ("Siegebreaker",  "Health",  "Grenade"),
+    ("Skirmisher",    "Melee",   "Weapons"),
+    ("Demolitionist", "Grenade", "Class"),
+    ("Colossus",      "Super",   "Health"),
+    ("Reaver",        "Class",   "Melee"),
+    ("Powerhouse",    "Weapons", "Super"),
+]
 # build key -> (primary stat, secondary stat). Primary is always Super here.
 BUILDS = {
     "super-class":   ("Super", "Class"),
@@ -952,7 +973,9 @@ def collect_armor(prof):
                 s[nm] = sv.get("value", 0)
         if not s:
             continue
-        top = sorted(s.items(), key=lambda x: -x[1])
+        # value desc, then canonical stat order — deterministic under ties
+        top = sorted(s.items(), key=lambda x: (-x[1], STAT_ORDER.index(x[0])))
+        top3 = [k for k, _ in top[:3]] if len(top) >= 3 else None
         out.append({
             "name": m["name"], "hash": it["itemHash"], "iid": iid,
             "slot": slot, "classType": m.get("classType"),
@@ -965,6 +988,10 @@ def collect_armor(prof):
             # archetype = two highest stats; sorted list, not a set, so the
             # piece dict stays JSON-serializable for armor_report.json
             "top2": sorted((top[0][0], top[1][0])),
+            # roll identity: the three rolled stats in rank order. Same key =
+            # same "product", differing only in quality (owner's key system).
+            "top3": top3,
+            "key": "_".join(top3) if top3 else None,
         })
     return out
 
@@ -1117,14 +1144,68 @@ def _print_build(combo, exotic_slot, primary, sec):
     print("   ---- set totals: %s=%d  %s=%d  (raw armor, pre mods/fragments)" %
           (primary, tp, sec, ts))
 
+def armor_coverage(pieces, class_type=2):
+    """Owned-key matrix for the coverage tracker (dashboard + armor_report).
+
+    The wanted key universe per bucket: every non-Health archetype pair x every
+    non-Health tertiary (8 archetypes x 3 tertiaries = 24 keys), plus one
+    Health-primary slot per bucket. For each cell, report the best owned
+    KEEPABLE legendary (tier 4+, ranked by gear tier then total); tier <4
+    pieces are dismantle fodder, so counting them would overstate coverage.
+    Missing cells are the farming list."""
+    slots = list(ARMOR_SLOTS.values())
+    wanted = []
+    for aname, pri, sec in ARMOR_ARCHETYPES:
+        if "Health" in (pri, sec):
+            continue
+        for ter in STAT_ORDER:
+            if ter == "Health" or ter in (pri, sec):
+                continue
+            wanted.append({"archetype": aname, "primary": pri, "secondary": sec,
+                           "tertiary": ter, "key": "%s_%s_%s" % (pri, sec, ter)})
+    best, health_best = {}, {}
+    for p in pieces:
+        if (p["classType"] != class_type or p["exotic"] or not p.get("top3")
+                or p["gt"] < 4):
+            continue
+        if p["top3"][0] == "Health":
+            cur = health_best.get(p["slot"])
+            if not cur or (p["gt"], p["total"]) > (cur["gt"], cur["total"]):
+                health_best[p["slot"]] = p
+        elif "Health" not in p["top3"]:
+            k = (p["slot"], p["key"])
+            cur = best.get(k)
+            if not cur or (p["gt"], p["total"]) > (cur["gt"], cur["total"]):
+                best[k] = p
+    def cell(p):
+        return {"gt": p["gt"], "total": p["total"], "name": p["name"],
+                "iid": p["iid"], "loc": "vault" if p["owner"] is None else "char"}
+    cells, health = {}, {}
+    for (slot, key_), p in best.items():
+        cells["%s|%s" % (slot, key_)] = cell(p)
+    for slot, p in health_best.items():
+        health[slot] = dict(cell(p), key=p["key"])
+    return {"slots": slots, "wanted": wanted, "cells": cells, "health": health}
+
 def cmd_armor_scan(build=None):
     token, _ = get_token()
     mtype, mid, name, prof = fetch_armor_profile(token)
     pieces = collect_armor(prof)
     _flush_caches()
+    coverage = armor_coverage(pieces)
     save_json(os.path.join(HERE, "armor_report.json"),
               {"account": name, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
-               "pieces": pieces})
+               "pieces": pieces, "coverage": coverage})
+    print("\n===== KEY COVERAGE (Warlock legendaries; %d wanted keys/bucket) ====="
+          % len(coverage["wanted"]))
+    for slot in coverage["slots"]:
+        owned = [c for k, c in coverage["cells"].items() if k.startswith(slot + "|")]
+        t5 = sum(1 for c in owned if c["gt"] >= 5)
+        hp = coverage["health"].get(slot)
+        print("  %-11s %2d/%d keys owned (%d at T5)%s" % (
+            slot, len(owned), len(coverage["wanted"]), t5,
+            "  | Health-primary: T%d %s" % (hp["gt"], hp["name"]) if hp else
+            "  | Health-primary: none"))
     # which classes actually own armor
     by_cls = {}
     for p in pieces:
@@ -1144,25 +1225,34 @@ def cmd_armor_scan(build=None):
 # ---------------------------------------------------------------------------
 # armor: keep/dismantle cleanup  (Warlock; owner's ability-focus policy)
 # ---------------------------------------------------------------------------
-DESIRED_STATS = {"Super", "Class", "Grenade", "Melee"}  # owner's ability-focus stats
+# Every stat the owner values — i.e. everything except Health. Weapons was
+# promoted to a priority stat 2026-08-13 ("armor should be focused around
+# having options"); Health stays excluded (survivability comes from kit).
+DESIRED_STATS = {"Weapons", "Super", "Class", "Grenade", "Melee"}
 
 def classify_armor(pieces, protected):
-    """Warlock keep/dismantle per owner policy: keep tier-4+ 'pure-ability'
-    legendaries (top-2 stats both in DESIRED_STATS) + the best copy of each
-    exotic; dismantle tier<4, off-stat (Health/Weapons-forward), and same-
-    archetype exotic dupes; distinct exotic archetypes + exotic class items go to
-    REVIEW. Off-class (non-Warlock) pieces are returned separately, untouched.
-    Uses the real armor gearTier (p['gt']), not rarity."""
+    """Warlock keep/dismantle per owner policy (key system, 2026-08-13):
+
+    A piece's KEY is its three rolled stats in rank order (top3), e.g.
+    Weapons_Super_Melee. Same (slot, key) = same product at different quality,
+    so: keep the best copy per (slot, key); a same-key copy is DISMANTLE only
+    when the kept one is >= it in every non-Health stat at >= gear tier,
+    otherwise REVIEW. Health rules: ONE Health-primary piece per slot is kept
+    as a survivability option (best copy, rest dismantle); Health as secondary
+    or tertiary = dismantle. Tier <4 = dismantle as before. Exotics: best copy
+    per name by non-Health stat points, dupes dismantled only when dominated,
+    distinct spreads + class items -> REVIEW. Off-class (non-Warlock) pieces
+    are returned separately, untouched. Uses the real armor gearTier."""
     from collections import defaultdict
     keep, dismantle, review, offclass = [], [], [], []
     warlock = []
     for p in pieces:
         p["prot"] = p["iid"] in protected
         (offclass if p["classType"] != 2 else warlock).append(p)
-    # Rank/compare exotic copies by ABILITY-stat points (Super/Class/Grenade/Melee),
+    # Rank/compare exotic copies by DESIRED-stat points (everything but Health),
     # not raw total. Raw total is useless here — every Tier-5 roll totals 75 (30/25/20),
     # so ranking on it ignored the tertiary stat and could keep a roll that wastes
-    # its 20 in Weapons/Health over one that puts it in a desired stat.
+    # its 20 in Health over one that puts it in a desired stat.
     def dvec(p):
         return {k: p["stats"].get(k, 0) for k in DESIRED_STATS}
     def dsum(p):
@@ -1183,30 +1273,93 @@ def classify_armor(pieces, protected):
         kept = []
         for i, p in enumerate(grp):
             if i == 0:
-                p["reason"] = "exotic - best ability roll kept (%d in Su/Cl/Gr/Me)" % dsum(p)
+                p["reason"] = "exotic - best roll kept (%d in non-Health stats)" % dsum(p)
                 keep.append(p); kept.append(p)
             elif p["prot"]:
                 p["reason"] = "exotic (equipped/loadout)"; keep.append(p); kept.append(p)
             elif any(dominates(k, p) for k in kept):
-                p["reason"] = "exotic dup - a kept copy beats it in every ability stat"
+                p["reason"] = "exotic dup - a kept copy beats it in every non-Health stat"
                 dismantle.append(p)
             else:                                 # distinct useful spread -> your call
-                p["reason"] = "distinct exotic roll (%d in Su/Cl/Gr/Me) - your call" % dsum(p)
+                p["reason"] = "distinct exotic roll (%d in non-Health stats) - your call" % dsum(p)
                 review.append(p); kept.append(p)
+
+    # --- legendaries: key-coverage policy ------------------------------------
+    by_cell = defaultdict(list)      # (slot, key) -> pieces with Health-free keys
+    health_lead = defaultdict(list)  # slot -> Health-primary pieces
     for p in (x for x in warlock if not x["exotic"]):
         if p["prot"]:
             p["reason"] = "equipped / in loadout"; keep.append(p)
         elif p["gt"] < 4:
             p["reason"] = ("tier %d (<4)" % p["gt"]) if p["gt"] else "legacy (no tier)"
             dismantle.append(p)
-        elif not (set(p["top2"]) <= DESIRED_STATS):
-            lead = "Health" if "Health" in p["top2"] else "Weapons"
-            p["reason"] = "%s-forward (top2 %s)" % (lead, "+".join(sorted(p["top2"])))
+        elif not p.get("top3"):
+            p["reason"] = "unreadable stat roll - your call"; review.append(p)
+        elif p["top3"][0] == "Health":
+            health_lead[p["slot"]].append(p)
+        elif "Health" in p["top3"]:
+            pos = "secondary" if p["top3"][1] == "Health" else "tertiary"
+            p["reason"] = "Health %s (key %s)" % (pos, p["key"])
             dismantle.append(p)
         else:
-            p["reason"] = "tier %d %s" % (p["gt"], "+".join(sorted(p["top2"])))
-            keep.append(p)
+            by_cell[(p["slot"], p["key"])].append(p)
+    for (slot, key_), grp in sorted(by_cell.items()):
+        grp.sort(key=lambda p: (p["gt"], p["total"], dsum(p)), reverse=True)
+        best = grp[0]
+        best["reason"] = "tier %d best %s" % (best["gt"], key_)
+        keep.append(best)
+        for p in grp[1:]:
+            if dominates(best, p):
+                p["reason"] = "worse copy of %s %s - kept a better one" % (slot, key_)
+                dismantle.append(p)
+            else:
+                p["reason"] = "same key %s, not strictly worse - your call" % key_
+                review.append(p)
+    # one Health-primary survivability option per slot; the rest are surplus
+    for slot, grp in sorted(health_lead.items()):
+        grp.sort(key=lambda p: (p["gt"], p["total"]), reverse=True)
+        best = grp[0]
+        best["reason"] = "tier %d Health-primary option (%s, one per bucket)" % (best["gt"], best["key"])
+        keep.append(best)
+        for p in grp[1:]:
+            p["reason"] = "surplus Health-primary %s - best copy kept" % slot
+            dismantle.append(p)
     return keep, dismantle, review, offclass
+
+def cmd_pull(iid):
+    """Transfer one item instance from the vault to its class's character —
+    the dashboard 'Armor keys' pull arrow runs this; works from the CLI too.
+    Vault -> character only; if the piece already sits on a character it just
+    reports where. Transfers are reversible and never touch lock state."""
+    token, _ = get_token()
+    mtype, mid, name, prof = fetch_armor_profile(token)
+    item = None
+    for it in prof.get("profileInventory", {}).get("data", {}).get("items", []):
+        if it.get("itemInstanceId") == iid:
+            item = it; break
+    if item is None:
+        cid = _item_char_map(prof).get(iid)
+        if cid:
+            ch = prof.get("characters", {}).get("data", {}).get(cid, {})
+            print("Already on your %s - nothing to do."
+                  % CLASS_TYPES.get(ch.get("classType"), "character"))
+            return
+        die("Instance %s not found in this profile - re-run armor-scan?" % iid)
+    m = armor_meta(item["itemHash"])
+    # armor must land on a matching-class character (classType 3 = any class)
+    target, target_ct = None, None
+    for cid, ch in prof.get("characters", {}).get("data", {}).items():
+        if m.get("classType") in (ch.get("classType"), 3):
+            target, target_ct = cid, ch.get("classType"); break
+    if target is None:
+        target = _any_char_id(prof)
+    ok, status, msg = _transfer(token, mtype, item["itemHash"], iid, target,
+                                to_vault=False)
+    if ok:
+        print("Pulled %s from the vault to your %s."
+              % (m["name"], CLASS_TYPES.get(target_ct, "character")))
+    else:
+        die("Transfer failed: %s - %s" % (status, msg))
 
 def cmd_armor_cleanup(do_lock=False):
     token, _ = get_token()
@@ -1249,8 +1402,8 @@ def cmd_armor_cleanup(do_lock=False):
     print("\n===== WARLOCK ARMOR CLEANUP (%d pieces; %d off-class skipped) =====" %
           (len(keep) + len(dismantle) + len(review), len(offclass)))
     print("  KEEP:      %d" % len(keep))
-    print("  DISMANTLE: %d   (tier<4 / off-stat / dup exotic)" % len(dismantle))
-    print("  REVIEW:    %d   (exotic class items + distinct exotic rolls)" % len(review))
+    print("  DISMANTLE: %d   (tier<4 / Health sec+ter / surplus Health-primary / worse same-key)" % len(dismantle))
+    print("  REVIEW:    %d   (class items, distinct exotics, same-key not-worse)" % len(review))
     print("\n----- DISMANTLE -----")
     for p in sorted(dismantle, key=lambda p: p["slot"])[:60]:
         print("  [DISMANTLE] %-24s %-11s | %s" % (p["name"][:24], p["slot"], p["reason"]))
@@ -1260,7 +1413,8 @@ def cmd_armor_cleanup(do_lock=False):
     def row(p):
         return {"name": p["name"], "iid": p["iid"], "slot": p["slot"],
                 "exotic": p["exotic"], "gt": p["gt"], "total": p["total"],
-                "power": p.get("power", 0), "reason": p["reason"]}
+                "power": p.get("power", 0), "key": p.get("key"),
+                "reason": p["reason"]}
     save_json(os.path.join(HERE, "armor_cleanup_report.json"), {
         "account": name, "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "summary": {"keep": len(keep), "dismantle": len(dismantle),
@@ -1558,6 +1712,11 @@ def main():
         cmd_armor_scan(build)
     elif cmd == "armor-cleanup":
         cmd_armor_cleanup(do_lock="--lock" in sys.argv)
+    elif cmd == "pull":
+        if len(sys.argv) < 3 or not sys.argv[2].isdigit():
+            die("Usage: pull <itemInstanceId>   (iids are in armor_report.json "
+                "/ the dashboard Armor keys panel)")
+        cmd_pull(sys.argv[2])
     elif cmd in ("equip-armor", "apply-loadout"):
         args = sys.argv[2:]
         dry = "--dry-run" in args

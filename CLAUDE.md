@@ -59,6 +59,16 @@ become the defaults for the dashboard AND `dismantle_all.py`.
 an item is KEEP only if it has ≥1 perk from **every** group. Perk names are case-sensitive and must
 match in-game text. `scan` writes `vault_report.json`.
 
+**Armor uses a KEY system, not rules.yaml** (owner policy 2026-08-13): a piece's key is its
+three rolled stats in rank order (`Weapons_Super_Melee`). `classify_armor` keeps the best
+copy per (bucket, key); same-key worse copies dismantle only when dominated in every
+non-Health stat at ≥ gear tier. Health: ONE Health-primary piece per bucket is kept;
+Health as secondary/tertiary = dismantle; tier <4 = dismantle. `armor-scan` writes a
+`coverage` matrix (24 wanted keys/bucket + Health-primary) into `armor_report.json`;
+the dashboard's **🛡 Armor keys** button renders it (missing cells = farming list;
+column order M/G/S/C/W per owner preference). Owned vault pieces get a ⬅ arrow that
+runs `destiny_vault.py pull <iid>` — a reversible vault→class-character transfer.
+
 **Power-floor protection** (both scans, applied last): the highest-power item in each
 bucket is never dismantled — max power counts your best item per slot, so shredding it
 would lower it. Weapons: per Kinetic/Energy/Power slot; armor: per (class, slot). Ties
